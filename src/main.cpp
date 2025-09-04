@@ -1,6 +1,10 @@
 #include <iostream>
 
+#include "server.h"
+
 int main() {
-  std::cout << "Hello, World!" << std::endl;
+  cpp2ls::server server{std::cin, std::cout};
+
+  server.run();
   return 0;
 }
