@@ -3,7 +3,7 @@
 #include "server.h"
 
 int main() {
-  cpp2ls::server server{std::cin, std::cout};
+  cpp2ls::Server server{std::cin, std::cout};
 
   server.run();
   return 0;

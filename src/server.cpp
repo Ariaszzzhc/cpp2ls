@@ -1,108 +1,254 @@
 #include "server.h"
 
 #include <format>
-#include <optional>
-#include <ostream>
-#include <string>
+#include <iostream>
 
 namespace cpp2ls {
-  void trim_str(std::string& str) {
-    std::string WHITESPACE{" \n\r\t\f\v"};
-    auto end = str.find_last_not_of(WHITESPACE);
-    auto start = str.find_first_not_of(WHITESPACE);
 
-    if (end == std::string::npos) {
-      str = "";
-    } else {
-      str = str.substr(start, end - start + 1);
-    }
+  // StdinReader implementation
+  StdinReader::StdinReader(std::istream& stream) : m_stream{&stream} {}
+
+  size_t StdinReader::Read(std::byte* out, size_t count) {
+    m_stream->read(reinterpret_cast<char*>(out),
+                   static_cast<std::streamsize>(count));
+    return static_cast<size_t>(m_stream->gcount());
   }
 
-  server::server(std::istream& input, std::ostream& output)
-      : m_input_stream{&input}, m_output_stream{&output} {}
+  // StdoutWriter implementation
+  StdoutWriter::StdoutWriter(std::ostream& stream) : m_stream{&stream} {}
 
-  void server::run() {
-    while (m_input_stream->good()) {
-      try {
-        auto req = read_request();
-
-        if (req.has_value()) {
-          auto res = handle_request(*req);
-
-          send_response(res);
-        }
-      } catch (const nlohmann::json::parse_error& err) {
-        headers_t headers;
-        nlohmann::json res_body;
-        nlohmann::json error;
-        error["code"] = -32700;
-        error["message"] = "Parse error";
-
-        res_body["jsonrpc"] = "2.0";
-        res_body["error"] = error;
-        res_body["id"] = nullptr;
-        auto raw_body = res_body.dump();
-        headers["Content-Length"] = std::to_string(raw_body.size());
-
-        response res{headers, res_body};
-        send_response(res);
-      } catch (const std::exception& err) {
-        std::cerr << std::format("Error: {}\n", err.what());
-      }
+  langsvr::Result<langsvr::SuccessType> StdoutWriter::Write(const std::byte* in,
+                                                            size_t count) {
+    m_stream->write(reinterpret_cast<const char*>(in),
+                    static_cast<std::streamsize>(count));
+    m_stream->flush();
+    if (m_stream->good()) {
+      return langsvr::Success;
     }
+    return langsvr::Failure{"Failed to write to output stream"};
   }
 
-  std::optional<request> server::read_request() {
-    headers_t headers;
-    std::string line;
-    while (std::getline(*m_input_stream, line)) {
-      if (!line.empty() && line.back() == '\r') {
-        line.pop_back();
-      }
+  // Server implementation
+  Server::Server(std::istream& input, std::ostream& output)
+      : m_reader{input}, m_writer{output} {
+    register_handlers();
 
-      if (line.empty()) {
+    // Set up the sender for the session
+    m_session.SetSender([this](std::string_view msg) {
+      return langsvr::WriteContent(m_writer, msg);
+    });
+  }
+
+  void Server::register_handlers() {
+    // Register initialize request handler
+    m_session.Register([this](const langsvr::lsp::InitializeRequest& req) {
+      return handle_initialize(req);
+    });
+
+    // Register shutdown request handler
+    m_session.Register([this](const langsvr::lsp::ShutdownRequest& req) {
+      return handle_shutdown(req);
+    });
+
+    // Register initialized notification handler
+    m_session.Register(
+        [this](const langsvr::lsp::InitializedNotification& notif) {
+          return handle_initialized(notif);
+        });
+
+    // Register exit notification handler
+    m_session.Register([this](const langsvr::lsp::ExitNotification& notif) {
+      return handle_exit(notif);
+    });
+
+    // Register textDocument/didOpen notification handler
+    m_session.Register(
+        [this](const langsvr::lsp::TextDocumentDidOpenNotification& notif) {
+          return handle_did_open(notif);
+        });
+
+    // Register textDocument/didChange notification handler
+    m_session.Register(
+        [this](const langsvr::lsp::TextDocumentDidChangeNotification& notif) {
+          return handle_did_change(notif);
+        });
+
+    // Register textDocument/didClose notification handler
+    m_session.Register(
+        [this](const langsvr::lsp::TextDocumentDidCloseNotification& notif) {
+          return handle_did_close(notif);
+        });
+
+    // Register textDocument/hover request handler
+    m_session.Register(
+        [this](const langsvr::lsp::TextDocumentHoverRequest& req) {
+          return handle_hover(req);
+        });
+  }
+
+  void Server::run() {
+    while (m_running) {
+      auto content = langsvr::ReadContent(m_reader);
+      if (content != langsvr::Success) {
+        // EOF or read error - exit the loop
         break;
       }
 
-      auto colon_pos = line.find(':');
-      if (colon_pos != std::string::npos) {
-        auto key = line.substr(0, colon_pos);
-        auto value = line.substr(colon_pos + 1);
-        // Trim whitespace
-        trim_str(key);
-        trim_str(value);
-        headers[key] = value;
+      auto result = m_session.Receive(content.Get());
+      if (result != langsvr::Success) {
+        std::cerr << std::format("Error processing message: {}\n",
+                                 result.Failure().reason);
+      }
+    }
+  }
+
+  langsvr::lsp::InitializeResult Server::handle_initialize(
+      const langsvr::lsp::InitializeRequest& req) {
+    std::cerr << "Received initialize request\n";
+
+    langsvr::lsp::InitializeResult result;
+
+    // Set server info
+    langsvr::lsp::ServerInfo server_info;
+    server_info.name = "cpp2ls";
+    server_info.version = "0.1.0";
+    result.server_info = server_info;
+
+    // Set capabilities
+    langsvr::lsp::ServerCapabilities& caps = result.capabilities;
+
+    // Text document sync - we want full document sync for now
+    caps.text_document_sync = langsvr::lsp::TextDocumentSyncKind::kFull;
+
+    // Enable hover support
+    caps.hover_provider = true;
+
+    // TODO: Add more capabilities as we implement them
+    // - completion
+    // - diagnostics
+    // - go to definition
+    // - etc.
+
+    m_initialized = true;
+    return result;
+  }
+
+  langsvr::lsp::Null Server::handle_shutdown(
+      const langsvr::lsp::ShutdownRequest& req) {
+    std::cerr << "Received shutdown request\n";
+    m_shutdown_requested = true;
+    return langsvr::lsp::Null{};
+  }
+
+  langsvr::Result<langsvr::SuccessType> Server::handle_initialized(
+      const langsvr::lsp::InitializedNotification& notif) {
+    std::cerr << "Client initialized\n";
+    return langsvr::Success;
+  }
+
+  langsvr::Result<langsvr::SuccessType> Server::handle_exit(
+      const langsvr::lsp::ExitNotification& notif) {
+    std::cerr << "Received exit notification\n";
+    m_running = false;
+    return langsvr::Success;
+  }
+
+  langsvr::Result<langsvr::SuccessType> Server::handle_did_open(
+      const langsvr::lsp::TextDocumentDidOpenNotification& notif) {
+    const auto& uri = notif.text_document.uri;
+    const auto& text = notif.text_document.text;
+
+    std::cerr << std::format("Document opened: {}\n", uri);
+
+    // Create and parse the document
+    auto [it, inserted] = m_documents.try_emplace(uri, uri);
+    it->second.update(text);
+
+    // TODO: Publish diagnostics from it->second.errors()
+
+    return langsvr::Success;
+  }
+
+  langsvr::Result<langsvr::SuccessType> Server::handle_did_change(
+      const langsvr::lsp::TextDocumentDidChangeNotification& notif) {
+    const auto& uri = notif.text_document.uri;
+
+    std::cerr << std::format("Document changed: {}\n", uri);
+
+    auto it = m_documents.find(uri);
+    if (it == m_documents.end()) {
+      return langsvr::Failure{std::format("Document not found: {}", uri)};
+    }
+
+    // Since we're using Full sync, we get the entire document content
+    for (const auto& change : notif.content_changes) {
+      // With Full sync, we expect TextDocumentContentChangeWholeDocument
+      if (auto* whole_doc
+          = change
+                .Get<langsvr::lsp::TextDocumentContentChangeWholeDocument>()) {
+        it->second.update(whole_doc->text);
       }
     }
 
-    if (headers.find("Content-Length") != headers.end()) {
-      auto content_length = std::stoi(headers["Content-Length"]);
-      std::string raw_body(content_length, '\0');
-      m_input_stream->read(&raw_body[0], content_length);
-      auto body = nlohmann::json::parse(raw_body);
+    // TODO: Re-publish diagnostics from it->second.errors()
 
-      return request{headers, body};
-    }
-
-    return std::nullopt;
+    return langsvr::Success;
   }
 
-  void server::send_response(const response& res) {
-    for (const auto& [key, value] : res.headers) {
-      *m_output_stream << std::format("{}: {}\r\n", key, value);
-    }
-    *m_output_stream << "\r\n";
-    *m_output_stream << res.body.dump();
-    m_output_stream->flush();
+  langsvr::Result<langsvr::SuccessType> Server::handle_did_close(
+      const langsvr::lsp::TextDocumentDidCloseNotification& notif) {
+    const auto& uri = notif.text_document.uri;
+
+    std::cerr << std::format("Document closed: {}\n", uri);
+
+    m_documents.erase(uri);
+
+    return langsvr::Success;
   }
 
-  response server::handle_request(const request& req) {
-    auto id = req.body["id"].get<std::int32_t>();
-    auto method = req.body["method"].get<std::string>();
+  langsvr::lsp::TextDocumentHoverRequest::ResultType Server::handle_hover(
+      const langsvr::lsp::TextDocumentHoverRequest& req) {
+    const auto& uri = req.text_document.uri;
+    const auto& pos = req.position;
 
-    response res;
+    std::cerr << std::format("Hover request: {} at ({}, {})\n", uri, pos.line,
+                             pos.character);
 
-    return res;
+    // Find the document
+    auto it = m_documents.find(uri);
+    if (it == m_documents.end()) {
+      return langsvr::lsp::Null{};
+    }
+
+    // Get hover info from the document
+    auto hover_info = it->second.get_hover_info(
+        static_cast<int>(pos.line), static_cast<int>(pos.character));
+
+    if (!hover_info) {
+      return langsvr::lsp::Null{};
+    }
+
+    // Build the hover response
+    langsvr::lsp::Hover hover;
+
+    // Set content as markdown
+    langsvr::lsp::MarkupContent content;
+    content.kind = langsvr::lsp::MarkupKind::kMarkdown;
+    content.value = hover_info->contents;
+    hover.contents = content;
+
+    // Set range
+    langsvr::lsp::Range range;
+    range.start.line
+        = static_cast<langsvr::lsp::Uinteger>(hover_info->start_line);
+    range.start.character
+        = static_cast<langsvr::lsp::Uinteger>(hover_info->start_col);
+    range.end.line = static_cast<langsvr::lsp::Uinteger>(hover_info->end_line);
+    range.end.character
+        = static_cast<langsvr::lsp::Uinteger>(hover_info->end_col);
+    hover.range = range;
+
+    return hover;
   }
 
 }  // namespace cpp2ls
