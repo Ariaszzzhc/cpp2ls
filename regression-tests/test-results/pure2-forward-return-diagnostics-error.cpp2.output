@@ -1,0 +1,3 @@
+pure2-forward-return-diagnostics-error.cpp2...
+pure2-forward-return-diagnostics-error.cpp2(1,48): error: a 'forward' return type cannot return a local variable
+
