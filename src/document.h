@@ -28,6 +28,20 @@ namespace cpp2ls {
     int end_col{0};        // 0-based
   };
 
+  /// Diagnostic information (decoupled from cpp2::error_entry)
+  struct DiagnosticInfo {
+    int line{0};    // 0-based line number
+    int column{0};  // 0-based column number
+    std::string message;
+    bool is_internal{false};  // Internal compiler error
+  };
+
+  /// Location information for go-to-definition
+  struct LocationInfo {
+    int line{0};    // 0-based line number
+    int column{0};  // 0-based column number
+  };
+
   /// Manages parsing and semantic analysis for a single cpp2 document
   class Cpp2Document {
   public:
@@ -46,14 +60,18 @@ namespace cpp2ls {
     /// Get hover information at the given position (0-based line and column)
     auto get_hover_info(int line, int col) const -> std::optional<HoverInfo>;
 
+    /// Get definition location at the given position (0-based line and column)
+    auto get_definition_location(int line, int col) const
+        -> std::optional<LocationInfo>;
+
     /// Get the document URI
     auto uri() const -> const std::string&;
 
     /// Check if parsing succeeded
     auto is_valid() const -> bool;
 
-    /// Get parsing errors
-    auto errors() const -> const std::vector<cpp2::error_entry>&;
+    /// Get diagnostics (converted from cpp2 errors)
+    auto diagnostics() const -> std::vector<DiagnosticInfo>;
 
   private:
     /// Find the token at the given position (1-based line and column)
@@ -67,7 +85,7 @@ namespace cpp2ls {
     std::string m_content;
 
     // Cppfront parsing state
-    std::vector<cpp2::error_entry> m_errors;
+    std::vector<cpp2::error_entry>* m_errors{nullptr};
     std::unique_ptr<cpp2::source> m_source;
     std::unique_ptr<cpp2::tokens> m_tokens;
     std::unique_ptr<cpp2::parser> m_parser;

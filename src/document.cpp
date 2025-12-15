@@ -15,17 +15,44 @@
 
 namespace cpp2ls {
 
-  Cpp2Document::Cpp2Document(std::string uri) : m_uri{std::move(uri)} {}
+  Cpp2Document::Cpp2Document(std::string uri) : m_uri{std::move(uri)} {
+    m_errors = new std::vector<cpp2::error_entry>();
+  }
 
-  Cpp2Document::~Cpp2Document() = default;
+  Cpp2Document::~Cpp2Document() { delete m_errors; }
 
-  Cpp2Document::Cpp2Document(Cpp2Document&&) noexcept = default;
-  Cpp2Document& Cpp2Document::operator=(Cpp2Document&&) noexcept = default;
+  Cpp2Document::Cpp2Document(Cpp2Document&& other) noexcept
+      : m_uri{std::move(other.m_uri)},
+        m_content{std::move(other.m_content)},
+        m_errors{other.m_errors},
+        m_source{std::move(other.m_source)},
+        m_tokens{std::move(other.m_tokens)},
+        m_parser{std::move(other.m_parser)},
+        m_sema{std::move(other.m_sema)},
+        m_valid{other.m_valid} {
+    other.m_errors = nullptr;
+  }
+
+  Cpp2Document& Cpp2Document::operator=(Cpp2Document&& other) noexcept {
+    if (this != &other) {
+      delete m_errors;
+      m_uri = std::move(other.m_uri);
+      m_content = std::move(other.m_content);
+      m_errors = other.m_errors;
+      m_source = std::move(other.m_source);
+      m_tokens = std::move(other.m_tokens);
+      m_parser = std::move(other.m_parser);
+      m_sema = std::move(other.m_sema);
+      m_valid = other.m_valid;
+      other.m_errors = nullptr;
+    }
+    return *this;
+  }
 
   void Cpp2Document::update(const std::string& content) {
     m_content = content;
     m_valid = false;
-    m_errors.clear();
+    m_errors->clear();
 
     // Reset parsing state
     m_source.reset();
@@ -40,15 +67,15 @@ namespace cpp2ls {
     {
       std::ofstream temp_file(temp_path);
       if (!temp_file) {
-        m_errors.emplace_back(cpp2::source_position{1, 1},
-                              "Failed to create temporary file for parsing");
+        m_errors->emplace_back(cpp2::source_position{1, 1},
+                               "Failed to create temporary file for parsing");
         return;
       }
       temp_file << content;
     }
 
     // Initialize cppfront components
-    m_source = std::make_unique<cpp2::source>(m_errors);
+    m_source = std::make_unique<cpp2::source>(*m_errors);
     if (!m_source->load(temp_path.string())) {
       // Remove temp file
       std::filesystem::remove(temp_path);
@@ -66,12 +93,12 @@ namespace cpp2ls {
     }
 
     // Lex the source
-    m_tokens = std::make_unique<cpp2::tokens>(m_errors);
+    m_tokens = std::make_unique<cpp2::tokens>(*m_errors);
     m_tokens->lex(m_source->get_lines());
 
     // Parse the tokens
     std::set<std::string> includes;
-    m_parser = std::make_unique<cpp2::parser>(m_errors, includes);
+    m_parser = std::make_unique<cpp2::parser>(*m_errors, includes);
 
     // Parse each section of cpp2 code
     for (const auto& [lineno, section_tokens] : m_tokens->get_map()) {
@@ -82,11 +109,11 @@ namespace cpp2ls {
     }
 
     // Run semantic analysis
-    m_sema = std::make_unique<cpp2::sema>(m_errors);
+    m_sema = std::make_unique<cpp2::sema>(*m_errors);
     m_parser->visit(*m_sema);
     m_sema->apply_local_rules();
 
-    m_valid = m_errors.empty();
+    m_valid = m_errors->empty();
   }
 
   auto Cpp2Document::get_hover_info(int line, int col) const
@@ -124,8 +151,51 @@ namespace cpp2ls {
 
   auto Cpp2Document::is_valid() const -> bool { return m_valid; }
 
-  auto Cpp2Document::errors() const -> const std::vector<cpp2::error_entry>& {
-    return m_errors;
+  auto Cpp2Document::get_definition_location(int line, int col) const
+      -> std::optional<LocationInfo> {
+    if (!m_valid || !m_sema) {
+      return std::nullopt;
+    }
+
+    // Convert from 0-based (LSP) to 1-based (cppfront)
+    const auto* token = find_token_at(line + 1, col + 1);
+    if (!token) {
+      return std::nullopt;
+    }
+
+    // Get declaration for this token
+    const auto* decl_sym = m_sema->get_declaration_of(token, true);
+    if (!decl_sym || !decl_sym->declaration) {
+      return std::nullopt;
+    }
+
+    // Get the position of the declaration
+    auto pos = decl_sym->position();
+
+    LocationInfo loc;
+    loc.line = pos.lineno - 1;   // Convert to 0-based
+    loc.column = pos.colno - 1;  // Convert to 0-based
+    return loc;
+  }
+
+  auto Cpp2Document::diagnostics() const -> std::vector<DiagnosticInfo> {
+    std::vector<DiagnosticInfo> result;
+    if (!m_errors) {
+      return result;
+    }
+    for (const auto& error : *m_errors) {
+      // Skip fallback errors if there are better ones
+      if (error.fallback && m_errors->size() > 1) {
+        continue;
+      }
+      DiagnosticInfo info;
+      info.line = std::max(0, error.where.lineno - 1);
+      info.column = std::max(0, error.where.colno - 1);
+      info.message = error.msg;
+      info.is_internal = error.internal;
+      result.push_back(std::move(info));
+    }
+    return result;
   }
 
   auto Cpp2Document::find_token_at(int line, int col) const

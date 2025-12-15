@@ -84,6 +84,12 @@ namespace cpp2ls {
         [this](const langsvr::lsp::TextDocumentHoverRequest& req) {
           return handle_hover(req);
         });
+
+    // Register textDocument/definition request handler
+    m_session.Register(
+        [this](const langsvr::lsp::TextDocumentDefinitionRequest& req) {
+          return handle_definition(req);
+        });
   }
 
   void Server::run() {
@@ -123,10 +129,12 @@ namespace cpp2ls {
     // Enable hover support
     caps.hover_provider = true;
 
+    // Enable go to definition support
+    caps.definition_provider = true;
+
     // TODO: Add more capabilities as we implement them
     // - completion
-    // - diagnostics
-    // - go to definition
+    // - find references
     // - etc.
 
     m_initialized = true;
@@ -164,7 +172,8 @@ namespace cpp2ls {
     auto [it, inserted] = m_documents.try_emplace(uri, uri);
     it->second.update(text);
 
-    // TODO: Publish diagnostics from it->second.errors()
+    // Publish diagnostics
+    publish_diagnostics(it->second);
 
     return langsvr::Success;
   }
@@ -190,7 +199,8 @@ namespace cpp2ls {
       }
     }
 
-    // TODO: Re-publish diagnostics from it->second.errors()
+    // Publish diagnostics
+    publish_diagnostics(it->second);
 
     return langsvr::Success;
   }
@@ -200,6 +210,12 @@ namespace cpp2ls {
     const auto& uri = notif.text_document.uri;
 
     std::cerr << std::format("Document closed: {}\n", uri);
+
+    // Clear diagnostics for this document
+    langsvr::lsp::TextDocumentPublishDiagnosticsNotification clear_diag;
+    clear_diag.uri = uri;
+    clear_diag.diagnostics = {};  // Empty diagnostics clears them
+    m_session.Send(clear_diag);
 
     m_documents.erase(uri);
 
@@ -249,6 +265,91 @@ namespace cpp2ls {
     hover.range = range;
 
     return hover;
+  }
+
+  langsvr::lsp::TextDocumentDefinitionRequest::ResultType
+  Server::handle_definition(
+      const langsvr::lsp::TextDocumentDefinitionRequest& req) {
+    const auto& uri = req.text_document.uri;
+    const auto& pos = req.position;
+
+    std::cerr << std::format("Definition request: {} at ({}, {})\n", uri,
+                             pos.line, pos.character);
+
+    // Find the document
+    auto it = m_documents.find(uri);
+    if (it == m_documents.end()) {
+      return langsvr::lsp::Null{};
+    }
+
+    // Get definition location from the document
+    auto def_loc = it->second.get_definition_location(
+        static_cast<int>(pos.line), static_cast<int>(pos.character));
+
+    if (!def_loc) {
+      return langsvr::lsp::Null{};
+    }
+
+    // Build the location response
+    langsvr::lsp::Location location;
+    location.uri = uri;  // Same document for now
+
+    langsvr::lsp::Range range;
+    range.start.line = static_cast<langsvr::lsp::Uinteger>(def_loc->line);
+    range.start.character
+        = static_cast<langsvr::lsp::Uinteger>(def_loc->column);
+    range.end.line = range.start.line;
+    range.end.character = range.start.character + 1;  // Minimal range
+    location.range = range;
+
+    // Wrap in Definition type (OneOf<Location, vector<Location>>)
+    langsvr::lsp::Definition definition{location};
+    return definition;
+  }
+
+  void Server::publish_diagnostics(const Cpp2Document& doc) {
+    langsvr::lsp::TextDocumentPublishDiagnosticsNotification notification;
+    notification.uri = doc.uri();
+
+    // Convert cpp2 diagnostics to LSP diagnostics
+    for (const auto& diag_info : doc.diagnostics()) {
+      langsvr::lsp::Diagnostic diag;
+
+      // Set range - DiagnosticInfo already uses 0-based positions
+      langsvr::lsp::Position start_pos;
+      start_pos.line = static_cast<langsvr::lsp::Uinteger>(diag_info.line);
+      start_pos.character
+          = static_cast<langsvr::lsp::Uinteger>(diag_info.column);
+
+      langsvr::lsp::Position end_pos;
+      end_pos.line = start_pos.line;
+      // Mark a reasonable range (end of line or some characters)
+      end_pos.character = start_pos.character + 1;
+
+      diag.range.start = start_pos;
+      diag.range.end = end_pos;
+
+      // Set severity - cppfront errors are all errors (no warnings yet)
+      diag.severity = langsvr::lsp::DiagnosticSeverity::kError;
+
+      // Set message
+      diag.message = diag_info.message;
+
+      // Set source
+      diag.source = "cpp2";
+
+      notification.diagnostics.push_back(std::move(diag));
+    }
+
+    std::cerr << std::format("Publishing {} diagnostics for {}\n",
+                             notification.diagnostics.size(), doc.uri());
+
+    // Send the notification
+    auto result = m_session.Send(notification);
+    if (result != langsvr::Success) {
+      std::cerr << std::format("Failed to send diagnostics: {}\n",
+                               result.Failure().reason);
+    }
   }
 
 }  // namespace cpp2ls

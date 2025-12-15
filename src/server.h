@@ -79,6 +79,13 @@ namespace cpp2ls {
     langsvr::lsp::TextDocumentHoverRequest::ResultType handle_hover(
         const langsvr::lsp::TextDocumentHoverRequest& req);
 
+    /// Handler for textDocument/definition request
+    langsvr::lsp::TextDocumentDefinitionRequest::ResultType handle_definition(
+        const langsvr::lsp::TextDocumentDefinitionRequest& req);
+
+    /// Publish diagnostics for a document
+    void publish_diagnostics(const Cpp2Document& doc);
+
   private:
     StdinReader m_reader;
     StdoutWriter m_writer;
