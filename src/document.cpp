@@ -117,24 +117,29 @@ namespace cpp2ls {
     m_valid = m_errors->empty();
 
     // Cache successful parse results for use during editing
+    // Note: We can't copy sema because it has a reference member,
+    // so we only cache when the parse is successful
     if (m_valid && m_sema && !m_sema->symbols.empty()) {
+      // Move current results to cache
       m_cached_source = std::move(m_source);
       m_cached_tokens = std::move(m_tokens);
       m_cached_parser = std::move(m_parser);
       m_cached_sema = std::move(m_sema);
 
-      // Re-create empty pointers so we don't use moved-from objects
-      m_source = nullptr;
-      m_tokens = nullptr;
-      m_parser = nullptr;
-      m_sema = nullptr;
+      // NOTE: After moving to cache, m_sema is nullptr
+      // This is intentional - for valid files, we use cached_sema
     }
   }
 
   auto Cpp2Document::get_hover_info(int line, int col,
                                     const ProjectIndex* index) const
       -> std::optional<HoverInfo> {
-    if (!m_sema) {
+    // Use cached sema if current is null
+    const cpp2::sema* sema_to_use = m_sema ? m_sema.get() : m_cached_sema.get();
+    const cpp2::tokens* tokens_to_use
+        = m_tokens ? m_tokens.get() : m_cached_tokens.get();
+
+    if (!sema_to_use || !tokens_to_use) {
       return std::nullopt;
     }
 
@@ -145,7 +150,7 @@ namespace cpp2ls {
     }
 
     // Try to get declaration info from cppfront's sema
-    const auto* decl_sym = m_sema->get_declaration_of(token, true);
+    const auto* decl_sym = sema_to_use->get_declaration_of(token, true);
     if (decl_sym && decl_sym->declaration) {
       HoverInfo info;
       info.contents = build_hover_content(*decl_sym);
@@ -188,7 +193,12 @@ namespace cpp2ls {
   auto Cpp2Document::get_definition_location(int line, int col,
                                              const ProjectIndex* index) const
       -> std::optional<LocationInfo> {
-    if (!m_sema) {
+    // Use cached sema if current is null
+    const cpp2::sema* sema_to_use = m_sema ? m_sema.get() : m_cached_sema.get();
+    const cpp2::tokens* tokens_to_use
+        = m_tokens ? m_tokens.get() : m_cached_tokens.get();
+
+    if (!sema_to_use || !tokens_to_use) {
       return std::nullopt;
     }
 
@@ -199,7 +209,7 @@ namespace cpp2ls {
     }
 
     // Get declaration from cppfront's sema
-    const auto* decl_sym = m_sema->get_declaration_of(token, true);
+    const auto* decl_sym = sema_to_use->get_declaration_of(token, true);
     if (decl_sym && decl_sym->declaration) {
       auto pos = decl_sym->position();
 
@@ -231,7 +241,12 @@ namespace cpp2ls {
       -> std::vector<LocationInfo> {
     std::vector<LocationInfo> result;
 
-    if (!m_sema) {
+    // Use cached sema if current is null
+    const cpp2::sema* sema_to_use = m_sema ? m_sema.get() : m_cached_sema.get();
+    const cpp2::tokens* tokens_to_use
+        = m_tokens ? m_tokens.get() : m_cached_tokens.get();
+
+    if (!sema_to_use || !tokens_to_use) {
       return result;
     }
 
@@ -244,7 +259,7 @@ namespace cpp2ls {
     std::string symbol_name;
 
     // Get declaration from cppfront's sema
-    const auto* target_decl = m_sema->get_declaration_of(token, true);
+    const auto* target_decl = sema_to_use->get_declaration_of(token, true);
 
     if (target_decl && target_decl->declaration) {
       // Include declaration if requested
@@ -263,7 +278,7 @@ namespace cpp2ls {
       }
 
       // Find all references in this file via cppfront's declaration_of map
-      for (const auto& [tok, decl_info] : m_sema->declaration_of) {
+      for (const auto& [tok, decl_info] : sema_to_use->declaration_of) {
         if (!tok || !decl_info.sym) {
           continue;
         }
@@ -603,11 +618,15 @@ namespace cpp2ls {
 
   auto Cpp2Document::find_token_at(int line, int col) const
       -> const cpp2::token* {
-    if (!m_tokens) {
+    // Use cached tokens if current is null
+    const cpp2::tokens* tokens_to_use
+        = m_tokens ? m_tokens.get() : m_cached_tokens.get();
+
+    if (!tokens_to_use) {
       return nullptr;
     }
 
-    for (const auto& [lineno, section_tokens] : m_tokens->get_map()) {
+    for (const auto& [lineno, section_tokens] : tokens_to_use->get_map()) {
       for (const auto& token : section_tokens) {
         auto pos = token.position();
 
@@ -714,17 +733,23 @@ namespace cpp2ls {
   auto Cpp2Document::get_indexed_symbols() const -> std::vector<IndexedSymbol> {
     std::vector<IndexedSymbol> result;
 
-    if (!m_parser || !m_tokens) {
+    // Use cached parser/tokens if current is null
+    const cpp2::parser* parser_to_use
+        = m_parser ? m_parser.get() : m_cached_parser.get();
+    const cpp2::tokens* tokens_to_use
+        = m_tokens ? m_tokens.get() : m_cached_tokens.get();
+
+    if (!parser_to_use || !tokens_to_use) {
       return result;
     }
 
-    for (const auto& [lineno, section_tokens] : m_tokens->get_map()) {
+    for (const auto& [lineno, section_tokens] : tokens_to_use->get_map()) {
       if (section_tokens.empty()) {
         continue;
       }
 
       auto declarations
-          = m_parser->get_parse_tree_declarations_in_range(section_tokens);
+          = parser_to_use->get_parse_tree_declarations_in_range(section_tokens);
       for (const auto* decl : declarations) {
         if (!decl || !decl->has_name()) {
           continue;
