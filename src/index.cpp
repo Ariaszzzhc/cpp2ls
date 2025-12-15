@@ -393,7 +393,15 @@ namespace cpp2ls {
     FileIndex file_index;
     file_index.uri = uri;
     file_index.mtime = std::filesystem::file_time_type::clock::now();
-    file_index.symbols = symbols;
+
+    // Copy symbols and set their file_uri
+    file_index.symbols.reserve(symbols.size());
+    for (const auto& sym : symbols) {
+      IndexedSymbol sym_copy = sym;
+      sym_copy.file_uri = uri;
+      file_index.symbols.push_back(std::move(sym_copy));
+    }
+
     m_file_indices[uri] = std::move(file_index);
 
     // Rebuild symbol map

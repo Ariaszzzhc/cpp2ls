@@ -135,6 +135,12 @@ namespace cpp2ls {
     std::unique_ptr<cpp2::parser> m_parser;
     std::unique_ptr<cpp2::sema> m_sema;
     bool m_valid{false};
+
+    // Cached state from last successful parse (for completion during editing)
+    std::unique_ptr<cpp2::source> m_cached_source;
+    std::unique_ptr<cpp2::tokens> m_cached_tokens;
+    std::unique_ptr<cpp2::parser> m_cached_parser;
+    std::unique_ptr<cpp2::sema> m_cached_sema;
   };
 
 }  // namespace cpp2ls

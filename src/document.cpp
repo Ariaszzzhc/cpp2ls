@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <set>
 #include <sstream>
 
@@ -114,6 +115,20 @@ namespace cpp2ls {
     m_sema->apply_local_rules();
 
     m_valid = m_errors->empty();
+
+    // Cache successful parse results for use during editing
+    if (m_valid && m_sema && !m_sema->symbols.empty()) {
+      m_cached_source = std::move(m_source);
+      m_cached_tokens = std::move(m_tokens);
+      m_cached_parser = std::move(m_parser);
+      m_cached_sema = std::move(m_sema);
+
+      // Re-create empty pointers so we don't use moved-from objects
+      m_source = nullptr;
+      m_tokens = nullptr;
+      m_parser = nullptr;
+      m_sema = nullptr;
+    }
   }
 
   auto Cpp2Document::get_hover_info(int line, int col,
@@ -303,15 +318,42 @@ namespace cpp2ls {
     // Convert to 1-based for cppfront
     int target_line = line + 1;
 
-    // Track scope context
-    int cursor_scope_depth = 0;
-    bool found_containing_function = false;
+    // Use cached sema if:
+    // 1. Current sema is null or empty, OR
+    // 2. There are parse errors (m_valid is false) and cached sema has more
+    // symbols
+    const cpp2::sema* sema_to_use = m_sema.get();
+    if (m_cached_sema) {
+      bool current_empty = !sema_to_use || sema_to_use->symbols.empty();
+      bool cached_has_more = m_cached_sema->symbols.size()
+                             > (sema_to_use ? sema_to_use->symbols.size() : 0);
+      if (current_empty || (!m_valid && cached_has_more)) {
+        sema_to_use = m_cached_sema.get();
+      }
+    }
+
+    // Track which function contains the cursor
     const cpp2::declaration_node* containing_function = nullptr;
 
-    if (m_sema) {
-      // Find the containing function
-      for (const auto& sym : m_sema->symbols) {
-        if (!sym.is_declaration()) {
+    if (sema_to_use) {
+      // Find the innermost function containing the cursor by checking depth
+      // We iterate through all function declarations and find the one that:
+      // 1. Starts before the cursor
+      // 2. Has the highest depth (innermost)
+      // 3. The cursor is within its scope
+
+      // First, collect all symbols with their positions to understand scope
+      // boundaries
+      struct FunctionScope {
+        const cpp2::declaration_node* decl;
+        int start_line;
+        int end_line;  // Line of closing brace (0 if unknown)
+        int depth;
+      };
+      std::vector<FunctionScope> function_scopes;
+
+      for (const auto& sym : sema_to_use->symbols) {
+        if (!sym.is_declaration() || !sym.start) {
           continue;
         }
 
@@ -320,20 +362,53 @@ namespace cpp2ls {
           continue;
         }
 
-        auto decl_pos = decl_sym.position();
         const auto* decl = decl_sym.declaration;
+        if (decl->is_function()) {
+          auto pos = decl_sym.position();
+          int end_line = 0;
 
-        if (decl->is_function() && decl->has_name()) {
-          if (sym.start && decl_pos.lineno <= target_line) {
-            containing_function = decl;
-            cursor_scope_depth = sym.depth;
-            found_containing_function = true;
+          // Get the closing brace position from the function body
+          if (decl->initializer) {
+            if (auto* compound
+                = decl->initializer->get_if<cpp2::compound_statement_node>()) {
+              end_line = compound->close_brace.lineno;
+            }
+          }
+
+          function_scopes.push_back({decl, pos.lineno, end_line, sym.depth});
+        }
+      }
+
+      // Find the function that contains our cursor
+      // A function contains the cursor if:
+      // - The function starts before the cursor line
+      // - The cursor is before the function's closing brace
+      for (const auto& fs : function_scopes) {
+        if (fs.start_line > target_line) {
+          continue;  // Function starts after cursor
+        }
+
+        // Check if cursor is within this function's scope
+        // If we have a valid end_line (close_brace), use it
+        if (fs.end_line > 0 && target_line > fs.end_line) {
+          continue;  // Cursor is after the closing brace
+        }
+
+        // For nested functions, prefer the innermost one (highest depth)
+        if (containing_function == nullptr) {
+          containing_function = fs.decl;
+        } else {
+          // Check if this function is nested inside the current one
+          // by comparing depths and positions
+          if (fs.depth > 0
+              && fs.start_line > containing_function->position().lineno) {
+            containing_function = fs.decl;
           }
         }
       }
 
-      // Collect local symbols
-      for (const auto& sym : m_sema->symbols) {
+      // Collect visible symbols
+      for (const auto& sym : sema_to_use->symbols) {
         if (!sym.is_declaration() || !sym.start) {
           continue;
         }
@@ -344,10 +419,6 @@ namespace cpp2ls {
         }
 
         auto decl_pos = decl_sym.position();
-        if (decl_pos.lineno > target_line) {
-          continue;
-        }
-
         const auto* decl = decl_sym.declaration;
         auto name = decl_sym.identifier->to_string();
 
@@ -357,27 +428,30 @@ namespace cpp2ls {
 
         bool is_visible = false;
 
+        // Global functions, types, namespaces are always visible (cpp2 supports
+        // forward references)
         if (decl->is_function() || decl->is_type() || decl->is_namespace()) {
           if (decl->is_global()) {
             is_visible = true;
           }
         } else if (decl->is_object()) {
-          if (!found_containing_function) {
+          // For variables/parameters, they must be declared before cursor
+          if (decl_pos.lineno > target_line) {
+            continue;
+          }
+          // Check if they're in scope
+          if (containing_function == nullptr) {
+            // At global scope - only global variables are visible
             is_visible = decl->is_global();
           } else {
-            if (sym.depth <= cursor_scope_depth + 2) {
-              auto* parent = decl->parent_declaration;
-              while (parent) {
-                if (parent == containing_function) {
-                  is_visible = true;
-                  break;
-                }
-                parent = parent->parent_declaration;
-              }
-              if (decl_sym.parameter
-                  && decl->parent_declaration == containing_function) {
+            // Inside a function - check if variable belongs to our function
+            auto* var_parent = decl->parent_declaration;
+            while (var_parent) {
+              if (var_parent == containing_function) {
                 is_visible = true;
+                break;
               }
+              var_parent = var_parent->parent_declaration;
             }
           }
         }
