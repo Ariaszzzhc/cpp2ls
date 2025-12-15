@@ -4,3 +4,4 @@ compile_commands.json
 .vscode/
 .idea/
 .cache/
+.DS_Store

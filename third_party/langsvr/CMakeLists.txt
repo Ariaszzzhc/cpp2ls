@@ -67,20 +67,6 @@ function(set_if_not_defined name value description)
     endif()
 endfunction()
 
-set_if_not_defined(LANGSVR_THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party" "path to the third_party directory")
-set_if_not_defined(LANGSVR_JSON_LIB_DIR "${LANGSVR_THIRD_PARTY_DIR}/jsoncpp" "path to JSON library that langsvr will use")
-option_if_not_defined(LANGSVR_BUILD_TESTS true "build the langsvr unittests")
-
-# Detect JSON library in use
-if(NOT EXISTS "${LANGSVR_JSON_LIB_DIR}")
-    message(FATAL_ERROR "LANGSVR_JSON_LIB_DIR (${LANGSVR_JSON_LIB_DIR}) does not exist")
-endif()
-if(EXISTS "${LANGSVR_JSON_LIB_DIR}/jsoncppConfig.cmake.in")
-    set(LANGSVR_JSON_LIB JSONCPP)
-else()
-    message(FATAL_ERROR "Unrecognised JSON library at LANGSVR_JSON_LIB_DIR")
-endif()
-
 ################################################################################
 # langsvr
 ################################################################################
@@ -119,39 +105,3 @@ if(${LANGSVR_JSON_LIB} STREQUAL JSONCPP)
     target_link_libraries(langsvr jsoncpp_static)
 endif()
 
-################################################################################
-# langsvr_tests
-################################################################################
-if(LANGSVR_BUILD_TESTS)
-    if(NOT TARGET gmock)
-        add_subdirectory("${LANGSVR_THIRD_PARTY_DIR}/googletest" EXCLUDE_FROM_ALL)
-    endif()
-
-    add_executable(langsvr_tests
-        src/buffer_reader_test.cc
-        src/buffer_writer_test.cc
-        src/content_stream_test.cc
-        src/json/builder_test.cc
-        src/lsp/comparators_test.cc
-        src/lsp/decode_test.cc
-        src/lsp/encode_test.cc
-        src/one_of_test.cc
-        src/optional_test.cc
-        src/result_test.cc
-        src/session_test.cc
-        src/span_test.cc
-        src/traits_test.cc
-        src/utils/block_allocator_test.cc
-    )
-
-    target_include_directories(langsvr_tests PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}"
-        "${gmock_SOURCE_DIR}/include"
-    )
-
-    target_link_libraries(langsvr_tests
-        gmock
-        gtest_main
-        langsvr
-    )
-endif()
