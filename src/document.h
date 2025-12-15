@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // Forward declarations from cppfront
@@ -64,6 +65,11 @@ namespace cpp2ls {
     auto get_definition_location(int line, int col) const
         -> std::optional<LocationInfo>;
 
+    /// Get all references to the symbol at the given position (0-based)
+    /// If include_declaration is true, the declaration itself is included
+    auto get_references(int line, int col, bool include_declaration) const
+        -> std::vector<LocationInfo>;
+
     /// Get the document URI
     auto uri() const -> const std::string&;
 
@@ -91,6 +97,16 @@ namespace cpp2ls {
     std::unique_ptr<cpp2::parser> m_parser;
     std::unique_ptr<cpp2::sema> m_sema;
     bool m_valid{false};
+
+    // Two-pass analysis for forward references
+    // Maps function name -> declaration location (for forward-declared
+    // functions)
+    std::unordered_map<std::string, LocationInfo> m_function_declarations;
+    // Maps function name -> call locations (for finding references)
+    std::unordered_multimap<std::string, LocationInfo> m_function_calls;
+
+    /// Build function declaration and call maps for forward reference support
+    void build_function_maps();
   };
 
 }  // namespace cpp2ls

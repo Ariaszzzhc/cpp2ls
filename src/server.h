@@ -83,6 +83,10 @@ namespace cpp2ls {
     langsvr::lsp::TextDocumentDefinitionRequest::ResultType handle_definition(
         const langsvr::lsp::TextDocumentDefinitionRequest& req);
 
+    /// Handler for textDocument/references request
+    langsvr::lsp::TextDocumentReferencesRequest::ResultType handle_references(
+        const langsvr::lsp::TextDocumentReferencesRequest& req);
+
     /// Publish diagnostics for a document
     void publish_diagnostics(const Cpp2Document& doc);
 

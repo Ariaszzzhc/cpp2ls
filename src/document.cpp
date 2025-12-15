@@ -29,7 +29,9 @@ namespace cpp2ls {
         m_tokens{std::move(other.m_tokens)},
         m_parser{std::move(other.m_parser)},
         m_sema{std::move(other.m_sema)},
-        m_valid{other.m_valid} {
+        m_valid{other.m_valid},
+        m_function_declarations{std::move(other.m_function_declarations)},
+        m_function_calls{std::move(other.m_function_calls)} {
     other.m_errors = nullptr;
   }
 
@@ -44,6 +46,8 @@ namespace cpp2ls {
       m_parser = std::move(other.m_parser);
       m_sema = std::move(other.m_sema);
       m_valid = other.m_valid;
+      m_function_declarations = std::move(other.m_function_declarations);
+      m_function_calls = std::move(other.m_function_calls);
       other.m_errors = nullptr;
     }
     return *this;
@@ -59,6 +63,8 @@ namespace cpp2ls {
     m_tokens.reset();
     m_parser.reset();
     m_sema.reset();
+    m_function_declarations.clear();
+    m_function_calls.clear();
 
     // Create a temporary file for the content
     // (cppfront's source class reads from files)
@@ -113,6 +119,9 @@ namespace cpp2ls {
     m_parser->visit(*m_sema);
     m_sema->apply_local_rules();
 
+    // Build function maps for forward reference support
+    build_function_maps();
+
     m_valid = m_errors->empty();
   }
 
@@ -165,17 +174,122 @@ namespace cpp2ls {
 
     // Get declaration for this token
     const auto* decl_sym = m_sema->get_declaration_of(token, true);
-    if (!decl_sym || !decl_sym->declaration) {
-      return std::nullopt;
+    if (decl_sym && decl_sym->declaration) {
+      // Get the position of the declaration
+      auto pos = decl_sym->position();
+
+      LocationInfo loc;
+      loc.line = pos.lineno - 1;   // Convert to 0-based
+      loc.column = pos.colno - 1;  // Convert to 0-based
+      return loc;
     }
 
-    // Get the position of the declaration
-    auto pos = decl_sym->position();
+    // Fallback: check our custom function declarations map for forward
+    // references
+    auto name = token->to_string();
+    auto it = m_function_declarations.find(name);
+    if (it != m_function_declarations.end()) {
+      return it->second;
+    }
 
-    LocationInfo loc;
-    loc.line = pos.lineno - 1;   // Convert to 0-based
-    loc.column = pos.colno - 1;  // Convert to 0-based
-    return loc;
+    return std::nullopt;
+  }
+
+  auto Cpp2Document::get_references(int line, int col,
+                                    bool include_declaration) const
+      -> std::vector<LocationInfo> {
+    std::vector<LocationInfo> result;
+
+    if (!m_valid || !m_sema) {
+      return result;
+    }
+
+    // Convert from 0-based (LSP) to 1-based (cppfront)
+    const auto* token = find_token_at(line + 1, col + 1);
+    if (!token) {
+      return result;
+    }
+
+    // Get declaration for this token
+    const auto* target_decl = m_sema->get_declaration_of(token, true);
+
+    // Determine the function name for our custom maps
+    std::string func_name;
+    bool use_custom_maps = false;
+
+    if (target_decl && target_decl->declaration) {
+      // We have a declaration - include it if requested
+      if (include_declaration) {
+        auto pos = target_decl->position();
+        LocationInfo loc;
+        loc.line = pos.lineno - 1;
+        loc.column = pos.colno - 1;
+        result.push_back(loc);
+      }
+
+      // Iterate through declaration_of map to find all references
+      for (const auto& [tok, decl_info] : m_sema->declaration_of) {
+        if (!tok || !decl_info.sym) {
+          continue;
+        }
+
+        // Check if this token refers to the same declaration
+        if (decl_info.sym == target_decl) {
+          // Skip the declaration token itself (we already added it above)
+          auto pos = tok->position();
+          if (include_declaration
+              && pos.lineno - 1 == target_decl->position().lineno - 1
+              && pos.colno - 1 == target_decl->position().colno - 1) {
+            continue;
+          }
+
+          LocationInfo loc;
+          loc.line = pos.lineno - 1;
+          loc.column = pos.colno - 1;
+          result.push_back(loc);
+        }
+      }
+
+      // Check if this is a function declaration - we may have additional
+      // forward references in our custom map
+      if (target_decl->declaration->is_function()
+          && target_decl->declaration->has_name()) {
+        func_name = target_decl->declaration->name()->to_string();
+        use_custom_maps = true;
+      }
+    } else {
+      // No declaration found via cppfront - try our custom maps
+      func_name = token->to_string();
+      auto it = m_function_declarations.find(func_name);
+      if (it != m_function_declarations.end()) {
+        use_custom_maps = true;
+        // Include the declaration if requested
+        if (include_declaration) {
+          result.push_back(it->second);
+        }
+      }
+    }
+
+    // Add references from our custom function calls map
+    if (use_custom_maps && !func_name.empty()) {
+      auto range = m_function_calls.equal_range(func_name);
+      for (auto it = range.first; it != range.second; ++it) {
+        // Check if we already have this location
+        bool already_present = false;
+        for (const auto& existing : result) {
+          if (existing.line == it->second.line
+              && existing.column == it->second.column) {
+            already_present = true;
+            break;
+          }
+        }
+        if (!already_present) {
+          result.push_back(it->second);
+        }
+      }
+    }
+
+    return result;
   }
 
   auto Cpp2Document::diagnostics() const -> std::vector<DiagnosticInfo> {
@@ -280,6 +394,68 @@ namespace cpp2ls {
     }
 
     return oss.str();
+  }
+
+  void Cpp2Document::build_function_maps() {
+    if (!m_parser || !m_tokens) {
+      return;
+    }
+
+    // First pass: collect all top-level function declarations
+    // Use get_parse_tree_declarations_in_range for each token section
+    for (const auto& [lineno, section_tokens] : m_tokens->get_map()) {
+      if (section_tokens.empty()) {
+        continue;
+      }
+
+      auto declarations
+          = m_parser->get_parse_tree_declarations_in_range(section_tokens);
+      for (const auto* decl : declarations) {
+        if (!decl || !decl->is_function() || !decl->has_name()) {
+          continue;
+        }
+
+        auto name = decl->name()->to_string();
+        auto pos = decl->position();
+
+        LocationInfo loc;
+        loc.line = pos.lineno - 1;   // Convert to 0-based
+        loc.column = pos.colno - 1;  // Convert to 0-based
+        m_function_declarations[name] = loc;
+      }
+    }
+
+    // Second pass: scan tokens to find function call sites
+    // A function call is an identifier followed by '('
+    for (const auto& [lineno, section_tokens] : m_tokens->get_map()) {
+      for (size_t i = 0; i + 1 < section_tokens.size(); ++i) {
+        const auto& token = section_tokens[i];
+        const auto& next_token = section_tokens[i + 1];
+
+        // Check if this is an identifier followed by '('
+        if (token.type() == cpp2::lexeme::Identifier
+            && next_token.type() == cpp2::lexeme::LeftParen) {
+          auto name = token.to_string();
+
+          // Only record if this is a known function
+          if (m_function_declarations.contains(name)) {
+            auto pos = token.position();
+
+            // Skip if this is the declaration site itself
+            const auto& decl_loc = m_function_declarations[name];
+            if (pos.lineno - 1 == decl_loc.line
+                && pos.colno - 1 == decl_loc.column) {
+              continue;
+            }
+
+            LocationInfo loc;
+            loc.line = pos.lineno - 1;
+            loc.column = pos.colno - 1;
+            m_function_calls.emplace(name, loc);
+          }
+        }
+      }
+    }
   }
 
 }  // namespace cpp2ls

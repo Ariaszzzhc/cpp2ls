@@ -90,6 +90,12 @@ namespace cpp2ls {
         [this](const langsvr::lsp::TextDocumentDefinitionRequest& req) {
           return handle_definition(req);
         });
+
+    // Register textDocument/references request handler
+    m_session.Register(
+        [this](const langsvr::lsp::TextDocumentReferencesRequest& req) {
+          return handle_references(req);
+        });
   }
 
   void Server::run() {
@@ -131,6 +137,9 @@ namespace cpp2ls {
 
     // Enable go to definition support
     caps.definition_provider = true;
+
+    // Enable find references support
+    caps.references_provider = true;
 
     // TODO: Add more capabilities as we implement them
     // - completion
@@ -305,6 +314,54 @@ namespace cpp2ls {
     // Wrap in Definition type (OneOf<Location, vector<Location>>)
     langsvr::lsp::Definition definition{location};
     return definition;
+  }
+
+  langsvr::lsp::TextDocumentReferencesRequest::ResultType
+  Server::handle_references(
+      const langsvr::lsp::TextDocumentReferencesRequest& req) {
+    const auto& uri = req.text_document.uri;
+    const auto& pos = req.position;
+    bool include_declaration = req.context.include_declaration;
+
+    std::cerr << std::format(
+        "References request: {} at ({}, {}), includeDecl={}\n", uri, pos.line,
+        pos.character, include_declaration);
+
+    // Find the document
+    auto it = m_documents.find(uri);
+    if (it == m_documents.end()) {
+      return langsvr::lsp::Null{};
+    }
+
+    // Get references from the document
+    auto refs = it->second.get_references(static_cast<int>(pos.line),
+                                          static_cast<int>(pos.character),
+                                          include_declaration);
+
+    if (refs.empty()) {
+      return langsvr::lsp::Null{};
+    }
+
+    // Build the locations response
+    std::vector<langsvr::lsp::Location> locations;
+    locations.reserve(refs.size());
+
+    for (const auto& ref : refs) {
+      langsvr::lsp::Location location;
+      location.uri = uri;  // Same document for now
+
+      langsvr::lsp::Range range;
+      range.start.line = static_cast<langsvr::lsp::Uinteger>(ref.line);
+      range.start.character = static_cast<langsvr::lsp::Uinteger>(ref.column);
+      range.end.line = range.start.line;
+      range.end.character = range.start.character + 1;  // Minimal range
+      location.range = range;
+
+      locations.push_back(std::move(location));
+    }
+
+    std::cerr << std::format("Found {} references\n", locations.size());
+    return locations;
   }
 
   void Server::publish_diagnostics(const Cpp2Document& doc) {
