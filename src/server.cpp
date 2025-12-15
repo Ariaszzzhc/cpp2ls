@@ -1,5 +1,6 @@
 #include "server.h"
 
+#include <filesystem>
 #include <format>
 #include <iostream>
 
@@ -96,6 +97,12 @@ namespace cpp2ls {
         [this](const langsvr::lsp::TextDocumentReferencesRequest& req) {
           return handle_references(req);
         });
+
+    // Register textDocument/completion request handler
+    m_session.Register(
+        [this](const langsvr::lsp::TextDocumentCompletionRequest& req) {
+          return handle_completion(req);
+        });
   }
 
   void Server::run() {
@@ -117,6 +124,30 @@ namespace cpp2ls {
   langsvr::lsp::InitializeResult Server::handle_initialize(
       const langsvr::lsp::InitializeRequest& req) {
     std::cerr << "Received initialize request\n";
+
+    // Extract workspace root from initialization params
+    if (auto* root_uri = req.root_uri.Get<std::string>()) {
+      m_workspace_root = *root_uri;
+      std::cerr << "Workspace root URI: " << m_workspace_root << "\n";
+
+      // Convert URI to path and set up index
+      if (m_workspace_root.starts_with("file://")) {
+        auto root_path = std::filesystem::path(m_workspace_root.substr(7));
+        m_index.set_workspace_root(root_path);
+
+        // Try to load from cache first
+        if (!m_index.load_from_cache()) {
+          std::cerr << "No valid cache, scanning workspace...\n";
+          m_index.scan_and_index();
+          m_index.save_to_cache();
+        } else {
+          // Check for updated files even if cache loaded
+          if (m_index.scan_and_index()) {
+            m_index.save_to_cache();
+          }
+        }
+      }
+    }
 
     langsvr::lsp::InitializeResult result;
 
@@ -140,6 +171,11 @@ namespace cpp2ls {
 
     // Enable find references support
     caps.references_provider = true;
+
+    // Enable completion support
+    langsvr::lsp::CompletionOptions completion_opts;
+    completion_opts.trigger_characters = {".", ":"};
+    caps.completion_provider = completion_opts;
 
     // TODO: Add more capabilities as we implement them
     // - completion
@@ -181,6 +217,10 @@ namespace cpp2ls {
     auto [it, inserted] = m_documents.try_emplace(uri, uri);
     it->second.update(text);
 
+    // Update the global index with symbols from this document
+    auto symbols = it->second.get_indexed_symbols();
+    m_index.update_file(uri, symbols);
+
     // Publish diagnostics
     publish_diagnostics(it->second);
 
@@ -207,6 +247,10 @@ namespace cpp2ls {
         it->second.update(whole_doc->text);
       }
     }
+
+    // Update the global index with symbols from this document
+    auto symbols = it->second.get_indexed_symbols();
+    m_index.update_file(uri, symbols);
 
     // Publish diagnostics
     publish_diagnostics(it->second);
@@ -247,7 +291,7 @@ namespace cpp2ls {
 
     // Get hover info from the document
     auto hover_info = it->second.get_hover_info(
-        static_cast<int>(pos.line), static_cast<int>(pos.character));
+        static_cast<int>(pos.line), static_cast<int>(pos.character), &m_index);
 
     if (!hover_info) {
       return langsvr::lsp::Null{};
@@ -291,9 +335,9 @@ namespace cpp2ls {
       return langsvr::lsp::Null{};
     }
 
-    // Get definition location from the document
+    // Get definition location from the document (uses global index)
     auto def_loc = it->second.get_definition_location(
-        static_cast<int>(pos.line), static_cast<int>(pos.character));
+        static_cast<int>(pos.line), static_cast<int>(pos.character), &m_index);
 
     if (!def_loc) {
       return langsvr::lsp::Null{};
@@ -301,7 +345,8 @@ namespace cpp2ls {
 
     // Build the location response
     langsvr::lsp::Location location;
-    location.uri = uri;  // Same document for now
+    // Use the URI from the location (supports cross-file definitions)
+    location.uri = def_loc->uri.empty() ? uri : def_loc->uri;
 
     langsvr::lsp::Range range;
     range.start.line = static_cast<langsvr::lsp::Uinteger>(def_loc->line);
@@ -333,10 +378,10 @@ namespace cpp2ls {
       return langsvr::lsp::Null{};
     }
 
-    // Get references from the document
+    // Get references from the document (uses global index)
     auto refs = it->second.get_references(static_cast<int>(pos.line),
                                           static_cast<int>(pos.character),
-                                          include_declaration);
+                                          include_declaration, &m_index);
 
     if (refs.empty()) {
       return langsvr::lsp::Null{};
@@ -348,7 +393,8 @@ namespace cpp2ls {
 
     for (const auto& ref : refs) {
       langsvr::lsp::Location location;
-      location.uri = uri;  // Same document for now
+      // Use the URI from the reference (supports cross-file references)
+      location.uri = ref.uri.empty() ? uri : ref.uri;
 
       langsvr::lsp::Range range;
       range.start.line = static_cast<langsvr::lsp::Uinteger>(ref.line);
@@ -407,6 +453,71 @@ namespace cpp2ls {
       std::cerr << std::format("Failed to send diagnostics: {}\n",
                                result.Failure().reason);
     }
+  }
+
+  langsvr::lsp::TextDocumentCompletionRequest::ResultType
+  Server::handle_completion(
+      const langsvr::lsp::TextDocumentCompletionRequest& req) {
+    const auto& uri = req.text_document.uri;
+    const auto& pos = req.position;
+
+    std::cerr << std::format("Completion request: {} at ({}, {})\n", uri,
+                             pos.line, pos.character);
+
+    // Find the document
+    auto it = m_documents.find(uri);
+    if (it == m_documents.end()) {
+      return langsvr::lsp::Null{};
+    }
+
+    // Get completion items from the document (uses global index)
+    auto completions = it->second.get_completions(
+        static_cast<int>(pos.line), static_cast<int>(pos.character), &m_index);
+
+    if (completions.empty()) {
+      return langsvr::lsp::Null{};
+    }
+
+    // Convert to LSP completion items
+    std::vector<langsvr::lsp::CompletionItem> items;
+    items.reserve(completions.size());
+
+    for (const auto& comp : completions) {
+      langsvr::lsp::CompletionItem item;
+      item.label = comp.label;
+      item.detail = comp.detail;
+
+      if (!comp.insert_text.empty()) {
+        item.insert_text = comp.insert_text;
+      }
+
+      // Map our CompletionKind to LSP CompletionItemKind
+      switch (comp.kind) {
+        case CompletionKind::Function:
+          item.kind = langsvr::lsp::CompletionItemKind::kFunction;
+          break;
+        case CompletionKind::Variable:
+          item.kind = langsvr::lsp::CompletionItemKind::kVariable;
+          break;
+        case CompletionKind::Parameter:
+          item.kind = langsvr::lsp::CompletionItemKind::kVariable;
+          break;
+        case CompletionKind::Type:
+          item.kind = langsvr::lsp::CompletionItemKind::kClass;
+          break;
+        case CompletionKind::Namespace:
+          item.kind = langsvr::lsp::CompletionItemKind::kModule;
+          break;
+        case CompletionKind::Keyword:
+          item.kind = langsvr::lsp::CompletionItemKind::kKeyword;
+          break;
+      }
+
+      items.push_back(std::move(item));
+    }
+
+    std::cerr << std::format("Returning {} completion items\n", items.size());
+    return items;
   }
 
 }  // namespace cpp2ls

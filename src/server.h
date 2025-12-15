@@ -6,6 +6,7 @@
 #include <unordered_map>
 
 #include "document.h"
+#include "index.h"
 #include "langsvr/content_stream.h"
 #include "langsvr/lsp/lsp.h"
 #include "langsvr/reader.h"
@@ -87,6 +88,10 @@ namespace cpp2ls {
     langsvr::lsp::TextDocumentReferencesRequest::ResultType handle_references(
         const langsvr::lsp::TextDocumentReferencesRequest& req);
 
+    /// Handler for textDocument/completion request
+    langsvr::lsp::TextDocumentCompletionRequest::ResultType handle_completion(
+        const langsvr::lsp::TextDocumentCompletionRequest& req);
+
     /// Publish diagnostics for a document
     void publish_diagnostics(const Cpp2Document& doc);
 
@@ -101,6 +106,12 @@ namespace cpp2ls {
 
     /// Map of open documents by URI
     std::unordered_map<std::string, Cpp2Document> m_documents;
+
+    /// Project-wide symbol index
+    ProjectIndex m_index;
+
+    /// Workspace root path
+    std::string m_workspace_root;
   };
 
 }  // namespace cpp2ls

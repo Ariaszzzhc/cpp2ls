@@ -7,6 +7,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "index.h"
+
 // Forward declarations from cppfront
 namespace cpp2 {
   class source;
@@ -39,8 +41,27 @@ namespace cpp2ls {
 
   /// Location information for go-to-definition
   struct LocationInfo {
-    int line{0};    // 0-based line number
-    int column{0};  // 0-based column number
+    std::string uri;  // File URI (empty means current file)
+    int line{0};      // 0-based line number
+    int column{0};    // 0-based column number
+  };
+
+  /// Kind of completion item
+  enum class CompletionKind {
+    Function,
+    Variable,
+    Parameter,
+    Type,
+    Namespace,
+    Keyword
+  };
+
+  /// Completion item information
+  struct CompletionInfo {
+    std::string label;        // The text shown in the completion list
+    std::string detail;       // Additional details (e.g., type signature)
+    std::string insert_text;  // Text to insert (defaults to label)
+    CompletionKind kind{CompletionKind::Variable};
   };
 
   /// Manages parsing and semantic analysis for a single cpp2 document
@@ -59,16 +80,30 @@ namespace cpp2ls {
     void update(const std::string& content);
 
     /// Get hover information at the given position (0-based line and column)
-    auto get_hover_info(int line, int col) const -> std::optional<HoverInfo>;
+    /// Uses global index for cross-file symbol lookup
+    auto get_hover_info(int line, int col, const ProjectIndex* index) const
+        -> std::optional<HoverInfo>;
 
     /// Get definition location at the given position (0-based line and column)
-    auto get_definition_location(int line, int col) const
+    /// Uses global index for cross-file symbol lookup
+    auto get_definition_location(int line, int col,
+                                 const ProjectIndex* index) const
         -> std::optional<LocationInfo>;
 
     /// Get all references to the symbol at the given position (0-based)
+    /// Uses global index for cross-file references
     /// If include_declaration is true, the declaration itself is included
-    auto get_references(int line, int col, bool include_declaration) const
+    auto get_references(int line, int col, bool include_declaration,
+                        const ProjectIndex* index) const
         -> std::vector<LocationInfo>;
+
+    /// Get completion items at the given position (0-based line and column)
+    /// Uses global index for cross-file symbol completion
+    auto get_completions(int line, int col, const ProjectIndex* index) const
+        -> std::vector<CompletionInfo>;
+
+    /// Get indexed symbols for this document (for project-wide indexing)
+    auto get_indexed_symbols() const -> std::vector<IndexedSymbol>;
 
     /// Get the document URI
     auto uri() const -> const std::string&;
@@ -87,6 +122,9 @@ namespace cpp2ls {
     auto build_hover_content(const cpp2::declaration_sym& sym) const
         -> std::string;
 
+    /// Build hover content for an indexed symbol
+    auto build_hover_content(const IndexedSymbol& sym) const -> std::string;
+
     std::string m_uri;
     std::string m_content;
 
@@ -97,16 +135,6 @@ namespace cpp2ls {
     std::unique_ptr<cpp2::parser> m_parser;
     std::unique_ptr<cpp2::sema> m_sema;
     bool m_valid{false};
-
-    // Two-pass analysis for forward references
-    // Maps function name -> declaration location (for forward-declared
-    // functions)
-    std::unordered_map<std::string, LocationInfo> m_function_declarations;
-    // Maps function name -> call locations (for finding references)
-    std::unordered_multimap<std::string, LocationInfo> m_function_calls;
-
-    /// Build function declaration and call maps for forward reference support
-    void build_function_maps();
   };
 
 }  // namespace cpp2ls

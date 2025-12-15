@@ -15,11 +15,13 @@ target_link_libraries(cpp2ls PRIVATE nlohmann_json cppfront langsvr)
 target_sources(cpp2ls
     PRIVATE
         src/document.cpp
+        src/index.cpp
         src/main.cpp
         src/server.cpp
     PRIVATE
         FILE_SET HEADERS
         FILES
             src/document.h
+            src/index.h
             src/server.h
 )
