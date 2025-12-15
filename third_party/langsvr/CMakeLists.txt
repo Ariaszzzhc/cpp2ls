@@ -37,36 +37,6 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-enable_testing()
-
-################################################################################
-# Configuration options
-################################################################################
-
-# option_if_not_defined(name default description)
-# Behaves like:
-#   option(name description default)
-# If a variable is not already defined with the given name, otherwise the
-# function does nothing.
-# Simplifies customization by projects that use langsvr as a dependency.
-function(option_if_not_defined name default description)
-    if(NOT DEFINED ${name})
-        option(${name} ${description} ${default})
-    endif()
-endfunction()
-
-# set_if_not_defined(name value description)
-# Behaves like:
-#   set(${name} ${value} CACHE STRING ${description})
-# If a variable is not already defined with the given name, otherwise the
-# function does nothing.
-# Simplifies customization by projects that use langsvr as a dependency.
-function(set_if_not_defined name value description)
-    if(NOT DEFINED ${name})
-        set(${name} ${value} CACHE STRING ${description})
-    endif()
-endfunction()
-
 ################################################################################
 # langsvr
 ################################################################################
@@ -88,6 +58,7 @@ add_library(langsvr
     src/reader.cc
     src/session.cc
     src/writer.cc
+    src/json/nlohmann_json.cpp
     src/lsp/decode.cc
     src/lsp/encode.cc
     src/lsp/lsp.cc
@@ -96,12 +67,4 @@ add_library(langsvr
 
 target_include_directories(langsvr PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(langsvr PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-
-if(${LANGSVR_JSON_LIB} STREQUAL JSONCPP)
-    if(NOT TARGET jsoncpp_static)
-        add_subdirectory("${LANGSVR_THIRD_PARTY_DIR}/jsoncpp" EXCLUDE_FROM_ALL)
-    endif()
-    target_sources(langsvr PRIVATE src/json/jsoncpp.cc)
-    target_link_libraries(langsvr jsoncpp_static)
-endif()
-
+target_link_libraries(langsvr PUBLIC nlohmann_json)

@@ -1,37 +1,11 @@
-// Copyright 2024 The langsvr Authors
-//
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are met:
-//
-// 1. Redistributions of source code must retain the above copyright notice, this
-//    list of conditions and the following disclaimer.
-//
-// 2. Redistributions in binary form must reproduce the above copyright notice,
-//    this list of conditions and the following disclaimer in the documentation
-//    and/or other materials provided with the distribution.
-//
-// 3. Neither the name of the copyright holder nor the names of its
-//    contributors may be used to endorse or promote products derived from
-//    this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-// DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-// FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-// SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-// CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-// OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
 #include "langsvr/json/builder.h"
 #include "langsvr/json/value.h"
 #include "langsvr/span.h"
 #include "src/utils/block_allocator.h"
 
-#include "json/reader.h"
-#include "json/writer.h"
+#include <sstream>
+
+#include "nlohmann/json.hpp"
 
 namespace langsvr::json {
 
@@ -41,7 +15,7 @@ class BuilderImpl;
 
 class ValueImpl : public Value {
   public:
-    ValueImpl(Json::Value&& value, BuilderImpl& builder) : v(std::move(value)), b(builder) {}
+    ValueImpl(nlohmann::json&& value, BuilderImpl& builder) : v(std::move(value)), b(builder) {}
 
     std::string Json() const override;
     json::Kind Kind() const override;
@@ -59,7 +33,7 @@ class ValueImpl : public Value {
 
     Failure ErrIncorrectType(std::string_view wanted) const;
 
-    Json::Value v;
+    nlohmann::json v;
     BuilderImpl& b;
 };
 
@@ -82,30 +56,30 @@ class BuilderImpl : public Builder {
 // ValueImpl
 ////////////////////////////////////////////////////////////////////////////////
 std::string ValueImpl::Json() const {
-    Json::StreamWriterBuilder builder;
-    builder["indentation"] = "";
-    builder["enableYAMLCompatibility"] = false;
-    return Json::writeString(builder, v);
+    return v.dump();
 }
 
 json::Kind ValueImpl::Kind() const {
     switch (v.type()) {
-        case Json::ValueType::nullValue:
+        case nlohmann::json::value_t::null:
             return json::Kind::kNull;
-        case Json::ValueType::intValue:
-            return json::Kind::kI64;
-        case Json::ValueType::uintValue:
-            return json::Kind::kU64;
-        case Json::ValueType::realValue:
-            return json::Kind::kF64;
-        case Json::ValueType::stringValue:
-            return json::Kind::kString;
-        case Json::ValueType::booleanValue:
+        case nlohmann::json::value_t::boolean:
             return json::Kind::kBool;
-        case Json::ValueType::arrayValue:
+        case nlohmann::json::value_t::number_integer:
+            return json::Kind::kI64;
+        case nlohmann::json::value_t::number_unsigned:
+            return json::Kind::kU64;
+        case nlohmann::json::value_t::number_float:
+            return json::Kind::kF64;
+        case nlohmann::json::value_t::string:
+            return json::Kind::kString;
+        case nlohmann::json::value_t::array:
             return json::Kind::kArray;
-        case Json::ValueType::objectValue:
+        case nlohmann::json::value_t::object:
             return json::Kind::kObject;
+        case nlohmann::json::value_t::binary:
+        case nlohmann::json::value_t::discarded:
+            break;
     }
 
     return json::Kind::kNull;
@@ -114,52 +88,51 @@ json::Kind ValueImpl::Kind() const {
 // json::Reader compliance
 
 Result<SuccessType> ValueImpl::Null() const {
-    if (v.isNull()) {
+    if (v.is_null()) {
         return Success;
     }
-    return ErrIncorrectType("Bool");
+    return ErrIncorrectType("Null");
 }
 
 Result<json::Bool> ValueImpl::Bool() const {
-    if (v.isBool()) {
-        return v.asBool();
+    if (v.is_boolean()) {
+        return v.get<bool>();
     }
     return ErrIncorrectType("Bool");
 }
 
 Result<json::I64> ValueImpl::I64() const {
-    if (v.isInt64()) {
-        return v.asInt64();
+    if (v.is_number_integer()) {
+        return v.get<json::I64>();
     }
     return ErrIncorrectType("I64");
 }
 
 Result<json::U64> ValueImpl::U64() const {
-    if (v.isUInt64()) {
-        return v.asUInt64();
+    if (v.is_number_unsigned()) {
+        return v.get<json::U64>();
     }
     return ErrIncorrectType("U64");
 }
 
 Result<json::F64> ValueImpl::F64() const {
-    if (v.isDouble()) {
-        return v.asDouble();
+    if (v.is_number_float()) {
+        return v.get<json::F64>();
     }
     return ErrIncorrectType("F64");
 }
 
 Result<json::String> ValueImpl::String() const {
-    if (v.isString()) {
-        return v.asString();
+    if (v.is_string()) {
+        return v.get<std::string>();
     }
     return ErrIncorrectType("String");
 }
 
 Result<const Value*> ValueImpl::Get(size_t index) const {
-    if (v.isArray()) {
+    if (v.is_array()) {
         if (index < v.size()) {
-            return b.allocator.Create(
-                v.get(static_cast<Json::ArrayIndex>(index), Json::Value::null), b);
+            return b.allocator.Create(nlohmann::json(v[index]), b);
         }
         std::stringstream err;
         err << "index >= array length of " << v.size();
@@ -169,10 +142,10 @@ Result<const Value*> ValueImpl::Get(size_t index) const {
 }
 
 Result<const Value*> ValueImpl::Get(std::string_view name) const {
-    if (v.isObject()) {
-        if (v.isMember(name.data(), name.data() + name.length())) {
-            return b.allocator.Create(
-                v.get(name.data(), name.data() + name.length(), Json::Value::null), b);
+    if (v.is_object()) {
+        std::string key(name);
+        if (v.contains(key)) {
+            return b.allocator.Create(nlohmann::json(v[key]), b);
         }
         std::stringstream err;
         err << "object has no field with name '" << name << "'";
@@ -182,23 +155,28 @@ Result<const Value*> ValueImpl::Get(std::string_view name) const {
 }
 
 size_t ValueImpl::Count() const {
-    return static_cast<size_t>(v.size());
+    return v.size();
 }
 
 Result<std::vector<std::string>> ValueImpl::MemberNames() const {
-    if (v.isObject()) {
-        return v.getMemberNames();
+    if (v.is_object()) {
+        std::vector<std::string> names;
+        names.reserve(v.size());
+        for (auto& [key, val] : v.items()) {
+            names.push_back(key);
+        }
+        return names;
     }
     return ErrIncorrectType("Object");
 }
 
 bool ValueImpl::Has(std::string_view name) const {
-    return v.isObject() && v.isMember(name.data(), name.data() + name.length());
+    return v.is_object() && v.contains(std::string(name));
 }
 
 Failure ValueImpl::ErrIncorrectType(std::string_view wanted) const {
     std::stringstream err;
-    err << "value is " << v.type() << ", not " << wanted;
+    err << "value is " << v.type_name() << ", not " << wanted;
     return Failure{err.str()};
 }
 
@@ -207,50 +185,48 @@ Failure ValueImpl::ErrIncorrectType(std::string_view wanted) const {
 ////////////////////////////////////////////////////////////////////////////////
 
 Result<const Value*> BuilderImpl::Parse(std::string_view json) {
-    Json::CharReaderBuilder builder;
-    std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
-    Json::Value root;
-    JSONCPP_STRING err;
-    if (!reader->parse(json.data(), json.data() + json.length(), &root, &err)) {
-        return Failure{err};
+    try {
+        auto root = nlohmann::json::parse(json);
+        return allocator.Create(std::move(root), *this);
+    } catch (const nlohmann::json::parse_error& e) {
+        return Failure{e.what()};
     }
-    return allocator.Create(std::move(root), *this);
 }
 
 const Value* BuilderImpl::Null() {
-    return allocator.Create(Json::nullValue, *this);
+    return allocator.Create(nlohmann::json(nullptr), *this);
 }
 
 const Value* BuilderImpl::Bool(json::Bool value) {
-    return allocator.Create(Json::Value(value), *this);
+    return allocator.Create(nlohmann::json(value), *this);
 }
 
 const Value* BuilderImpl::I64(json::I64 value) {
-    return allocator.Create(Json::Value(value), *this);
+    return allocator.Create(nlohmann::json(value), *this);
 }
 
 const Value* BuilderImpl::U64(json::U64 value) {
-    return allocator.Create(Json::Value(value), *this);
+    return allocator.Create(nlohmann::json(value), *this);
 }
 
 const Value* BuilderImpl::F64(json::F64 value) {
-    return allocator.Create(Json::Value(value), *this);
+    return allocator.Create(nlohmann::json(value), *this);
 }
 
 const Value* BuilderImpl::String(json::String value) {
-    return allocator.Create(Json::Value(value), *this);
+    return allocator.Create(nlohmann::json(value), *this);
 }
 
 const Value* BuilderImpl::Array(Span<const Value*> elements) {
-    Json::Value array(Json::arrayValue);
+    nlohmann::json array = nlohmann::json::array();
     for (auto* el : elements) {
-        array.append(static_cast<const ValueImpl*>(el)->v);
+        array.push_back(static_cast<const ValueImpl*>(el)->v);
     }
     return allocator.Create(std::move(array), *this);
 }
 
 const Value* BuilderImpl::Object(Span<Member> members) {
-    Json::Value object(Json::objectValue);
+    nlohmann::json object = nlohmann::json::object();
     for (auto& member : members) {
         object[member.name] = static_cast<const ValueImpl*>(member.value)->v;
     }
