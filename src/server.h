@@ -92,6 +92,20 @@ namespace cpp2ls {
     langsvr::lsp::TextDocumentCompletionRequest::ResultType handle_completion(
         const langsvr::lsp::TextDocumentCompletionRequest& req);
 
+    /// Handler for textDocument/documentSymbol request
+    langsvr::lsp::TextDocumentDocumentSymbolRequest::ResultType
+    handle_document_symbol(
+        const langsvr::lsp::TextDocumentDocumentSymbolRequest& req);
+
+    /// Handler for textDocument/signatureHelp request
+    langsvr::lsp::TextDocumentSignatureHelpRequest::ResultType
+    handle_signature_help(
+        const langsvr::lsp::TextDocumentSignatureHelpRequest& req);
+
+    /// Handler for workspace/symbol request
+    langsvr::lsp::WorkspaceSymbolRequest::ResultType handle_workspace_symbol(
+        const langsvr::lsp::WorkspaceSymbolRequest& req);
+
     /// Publish diagnostics for a document
     void publish_diagnostics(const Cpp2Document& doc);
 

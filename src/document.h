@@ -64,6 +64,26 @@ namespace cpp2ls {
     CompletionKind kind{CompletionKind::Variable};
   };
 
+  /// Parameter information for signature help
+  struct ParameterInfo {
+    std::string label;  // Parameter name and type (e.g., "name: std::string")
+    // Optional: documentation for this parameter
+  };
+
+  /// Signature information for a function/method
+  struct SignatureInfo {
+    std::string label;  // Full function signature
+    std::vector<ParameterInfo> parameters;
+    int active_parameter{
+        0};  // Which parameter is currently being typed (0-based)
+  };
+
+  /// Signature help result
+  struct SignatureHelpInfo {
+    std::vector<SignatureInfo> signatures;
+    int active_signature{0};  // Which signature to highlight (for overloads)
+  };
+
   /// Manages parsing and semantic analysis for a single cpp2 document
   class Cpp2Document {
   public:
@@ -101,6 +121,11 @@ namespace cpp2ls {
     /// Uses global index for cross-file symbol completion
     auto get_completions(int line, int col, const ProjectIndex* index) const
         -> std::vector<CompletionInfo>;
+
+    /// Get signature help at the given position (0-based line and column)
+    /// Shows function signature and parameter info when calling functions
+    auto get_signature_help(int line, int col, const ProjectIndex* index) const
+        -> std::optional<SignatureHelpInfo>;
 
     /// Get indexed symbols for this document (for project-wide indexing)
     auto get_indexed_symbols() const -> std::vector<IndexedSymbol>;

@@ -1,5 +1,6 @@
 #include "server.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <format>
 #include <iostream>
@@ -103,6 +104,23 @@ namespace cpp2ls {
         [this](const langsvr::lsp::TextDocumentCompletionRequest& req) {
           return handle_completion(req);
         });
+
+    // Register textDocument/documentSymbol request handler
+    m_session.Register(
+        [this](const langsvr::lsp::TextDocumentDocumentSymbolRequest& req) {
+          return handle_document_symbol(req);
+        });
+
+    // Register textDocument/signatureHelp request handler
+    m_session.Register(
+        [this](const langsvr::lsp::TextDocumentSignatureHelpRequest& req) {
+          return handle_signature_help(req);
+        });
+
+    // Register workspace/symbol request handler
+    m_session.Register([this](const langsvr::lsp::WorkspaceSymbolRequest& req) {
+      return handle_workspace_symbol(req);
+    });
   }
 
   void Server::run() {
@@ -177,9 +195,20 @@ namespace cpp2ls {
     completion_opts.trigger_characters = {".", ":"};
     caps.completion_provider = completion_opts;
 
+    // Enable document symbol support
+    caps.document_symbol_provider = true;
+
+    // Enable signature help support
+    langsvr::lsp::SignatureHelpOptions sig_help_opts;
+    sig_help_opts.trigger_characters = {"(", ","};
+    caps.signature_help_provider = sig_help_opts;
+
+    // Enable workspace symbol support
+    caps.workspace_symbol_provider = true;
+
     // TODO: Add more capabilities as we implement them
-    // - completion
-    // - find references
+    // - formatting
+    // - rename
     // - etc.
 
     m_initialized = true;
@@ -518,6 +547,249 @@ namespace cpp2ls {
 
     std::cerr << std::format("Returning {} completion items\n", items.size());
     return items;
+  }
+
+  auto Server::handle_document_symbol(
+      const langsvr::lsp::TextDocumentDocumentSymbolRequest& req)
+      -> langsvr::lsp::TextDocumentDocumentSymbolRequest::ResultType {
+    const auto& uri = req.text_document.uri;
+
+    std::cerr << std::format("Document symbol request: {}\n", uri);
+
+    // Find the document
+    auto it = m_documents.find(uri);
+    if (it == m_documents.end()) {
+      return langsvr::lsp::Null{};
+    }
+
+    // Get indexed symbols from the document
+    auto symbols = it->second.get_indexed_symbols();
+
+    if (symbols.empty()) {
+      return langsvr::lsp::Null{};
+    }
+
+    // Convert to LSP DocumentSymbol
+    std::vector<langsvr::lsp::DocumentSymbol> lsp_symbols;
+    lsp_symbols.reserve(symbols.size());
+
+    for (const auto& sym : symbols) {
+      langsvr::lsp::DocumentSymbol doc_sym;
+      doc_sym.name = sym.name;
+      doc_sym.detail = sym.signature;
+
+      // Map SymbolKind to LSP SymbolKind
+      switch (sym.kind) {
+        case SymbolKind::Function:
+          doc_sym.kind = langsvr::lsp::SymbolKind::kFunction;
+          break;
+        case SymbolKind::Variable:
+          doc_sym.kind = langsvr::lsp::SymbolKind::kVariable;
+          break;
+        case SymbolKind::Type:
+          doc_sym.kind = langsvr::lsp::SymbolKind::kClass;
+          break;
+        case SymbolKind::Namespace:
+          doc_sym.kind = langsvr::lsp::SymbolKind::kNamespace;
+          break;
+        case SymbolKind::Alias:
+          doc_sym.kind = langsvr::lsp::SymbolKind::kVariable;
+          break;
+      }
+
+      // Set range and selection range
+      langsvr::lsp::Position pos;
+      pos.line = static_cast<langsvr::lsp::Uinteger>(sym.line);
+      pos.character = static_cast<langsvr::lsp::Uinteger>(sym.column);
+
+      langsvr::lsp::Position end_pos;
+      end_pos.line = pos.line;
+      end_pos.character
+          = pos.character
+            + static_cast<langsvr::lsp::Uinteger>(sym.name.length());
+
+      langsvr::lsp::Range range;
+      range.start = pos;
+      range.end = end_pos;
+
+      doc_sym.range = range;
+      doc_sym.selection_range = range;
+
+      lsp_symbols.push_back(std::move(doc_sym));
+    }
+
+    return lsp_symbols;
+  }
+
+  auto Server::handle_signature_help(
+      const langsvr::lsp::TextDocumentSignatureHelpRequest& req)
+      -> langsvr::lsp::TextDocumentSignatureHelpRequest::ResultType {
+    const auto& uri = req.text_document.uri;
+    const auto& pos = req.position;
+
+    // Find the document
+    auto it = m_documents.find(uri);
+    if (it == m_documents.end()) {
+      return langsvr::lsp::Null{};
+    }
+
+    // Get signature help from the document
+    auto help_opt = it->second.get_signature_help(
+        static_cast<int>(pos.line), static_cast<int>(pos.character), &m_index);
+
+    if (!help_opt) {
+      return langsvr::lsp::Null{};
+    }
+
+    const auto& help = *help_opt;
+
+    // Convert to LSP SignatureHelp
+    langsvr::lsp::SignatureHelp lsp_help;
+    lsp_help.active_signature
+        = static_cast<langsvr::lsp::Uinteger>(help.active_signature);
+
+    for (const auto& sig : help.signatures) {
+      langsvr::lsp::SignatureInformation lsp_sig;
+      lsp_sig.label = sig.label;
+
+      // Convert parameters
+      std::vector<langsvr::lsp::ParameterInformation> params;
+      for (const auto& param : sig.parameters) {
+        langsvr::lsp::ParameterInformation lsp_param;
+        lsp_param.label = param.label;
+        params.push_back(std::move(lsp_param));
+      }
+      lsp_sig.parameters = std::move(params);
+
+      lsp_sig.active_parameter
+          = static_cast<langsvr::lsp::Uinteger>(sig.active_parameter);
+
+      lsp_help.signatures.push_back(std::move(lsp_sig));
+    }
+
+    return lsp_help;
+  }
+
+  auto Server::handle_workspace_symbol(
+      const langsvr::lsp::WorkspaceSymbolRequest& req)
+      -> langsvr::lsp::WorkspaceSymbolRequest::ResultType {
+    const std::string& query = req.query;
+
+    std::vector<langsvr::lsp::SymbolInformation> symbols;
+
+    // If query is empty, return all symbols (up to a reasonable limit)
+    if (query.empty()) {
+      auto all_syms = m_index.all_symbols();
+      const size_t max_results = 500;  // Limit to avoid overwhelming the client
+      size_t count = 0;
+
+      for (const auto* sym : all_syms) {
+        if (count >= max_results) break;
+
+        langsvr::lsp::SymbolInformation lsp_sym;
+        lsp_sym.name = sym->name;
+
+        // Map our SymbolKind to LSP SymbolKind
+        switch (sym->kind) {
+          case SymbolKind::Function:
+            lsp_sym.kind = langsvr::lsp::SymbolKind::kFunction;
+            break;
+          case SymbolKind::Type:
+            lsp_sym.kind = langsvr::lsp::SymbolKind::kClass;
+            break;
+          case SymbolKind::Namespace:
+            lsp_sym.kind = langsvr::lsp::SymbolKind::kNamespace;
+            break;
+          case SymbolKind::Variable:
+            lsp_sym.kind = langsvr::lsp::SymbolKind::kVariable;
+            break;
+          case SymbolKind::Alias:
+            lsp_sym.kind = langsvr::lsp::SymbolKind::kTypeParameter;
+            break;
+        }
+
+        // Set location
+        langsvr::lsp::Location loc;
+        loc.uri = sym->file_uri;
+
+        langsvr::lsp::Range range;
+        range.start.line = static_cast<langsvr::lsp::Uinteger>(sym->line);
+        range.start.character
+            = static_cast<langsvr::lsp::Uinteger>(sym->column);
+        range.end.line = static_cast<langsvr::lsp::Uinteger>(sym->line);
+        range.end.character = static_cast<langsvr::lsp::Uinteger>(
+            sym->column + sym->name.length());
+        loc.range = range;
+
+        lsp_sym.location = loc;
+
+        symbols.push_back(std::move(lsp_sym));
+        ++count;
+      }
+    } else {
+      // Filter symbols by query (case-insensitive substring match)
+      auto all_syms = m_index.all_symbols();
+      std::string query_lower = query;
+      std::transform(query_lower.begin(), query_lower.end(),
+                     query_lower.begin(),
+                     [](unsigned char c) { return std::tolower(c); });
+
+      const size_t max_results = 500;
+      size_t count = 0;
+
+      for (const auto* sym : all_syms) {
+        if (count >= max_results) break;
+
+        // Case-insensitive substring search
+        std::string name_lower = sym->name;
+        std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+
+        if (name_lower.find(query_lower) == std::string::npos) continue;
+
+        langsvr::lsp::SymbolInformation lsp_sym;
+        lsp_sym.name = sym->name;
+
+        // Map our SymbolKind to LSP SymbolKind
+        switch (sym->kind) {
+          case SymbolKind::Function:
+            lsp_sym.kind = langsvr::lsp::SymbolKind::kFunction;
+            break;
+          case SymbolKind::Type:
+            lsp_sym.kind = langsvr::lsp::SymbolKind::kClass;
+            break;
+          case SymbolKind::Namespace:
+            lsp_sym.kind = langsvr::lsp::SymbolKind::kNamespace;
+            break;
+          case SymbolKind::Variable:
+            lsp_sym.kind = langsvr::lsp::SymbolKind::kVariable;
+            break;
+          case SymbolKind::Alias:
+            lsp_sym.kind = langsvr::lsp::SymbolKind::kTypeParameter;
+            break;
+        }
+
+        // Set location
+        langsvr::lsp::Location loc;
+        loc.uri = sym->file_uri;
+
+        langsvr::lsp::Range range;
+        range.start.line = static_cast<langsvr::lsp::Uinteger>(sym->line);
+        range.start.character
+            = static_cast<langsvr::lsp::Uinteger>(sym->column);
+        range.end.line = static_cast<langsvr::lsp::Uinteger>(sym->line);
+        range.end.character = static_cast<langsvr::lsp::Uinteger>(
+            sym->column + sym->name.length());
+        loc.range = range;
+
+        lsp_sym.location = loc;
+
+        symbols.push_back(std::move(lsp_sym));
+        ++count;
+      }
+    }
+
+    return symbols;
   }
 
 }  // namespace cpp2ls

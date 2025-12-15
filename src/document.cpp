@@ -61,60 +61,72 @@ namespace cpp2ls {
     m_parser.reset();
     m_sema.reset();
 
-    // Create a temporary file for the content
-    // (cppfront's source class reads from files)
-    auto temp_path
-        = std::filesystem::temp_directory_path() / "cpp2ls_temp.cpp2";
-    {
-      std::ofstream temp_file(temp_path);
-      if (!temp_file) {
-        m_errors->emplace_back(cpp2::source_position{1, 1},
-                               "Failed to create temporary file for parsing");
+    // Wrap all parsing in try-catch to handle cppfront exceptions
+    // (e.g., "unexpected end of source file")
+    try {
+      // Create a temporary file for the content
+      // (cppfront's source class reads from files)
+      auto temp_path
+          = std::filesystem::temp_directory_path() / "cpp2ls_temp.cpp2";
+      {
+        std::ofstream temp_file(temp_path);
+        if (!temp_file) {
+          m_errors->emplace_back(cpp2::source_position{1, 1},
+                                 "Failed to create temporary file for parsing");
+          return;
+        }
+        temp_file << content;
+      }
+
+      // Initialize cppfront components
+      m_source = std::make_unique<cpp2::source>(*m_errors);
+      if (!m_source->load(temp_path.string())) {
+        // Remove temp file
+        std::filesystem::remove(temp_path);
         return;
       }
-      temp_file << content;
-    }
 
-    // Initialize cppfront components
-    m_source = std::make_unique<cpp2::source>(*m_errors);
-    if (!m_source->load(temp_path.string())) {
-      // Remove temp file
+      // Remove temp file now that we've loaded it
       std::filesystem::remove(temp_path);
-      return;
-    }
 
-    // Remove temp file now that we've loaded it
-    std::filesystem::remove(temp_path);
-
-    // Check if there's any cpp2 code to parse
-    if (!m_source->has_cpp2()) {
-      // No cpp2 code - this is valid but there's nothing to parse
-      m_valid = true;
-      return;
-    }
-
-    // Lex the source
-    m_tokens = std::make_unique<cpp2::tokens>(*m_errors);
-    m_tokens->lex(m_source->get_lines());
-
-    // Parse the tokens
-    std::set<std::string> includes;
-    m_parser = std::make_unique<cpp2::parser>(*m_errors, includes);
-
-    // Parse each section of cpp2 code
-    for (const auto& [lineno, section_tokens] : m_tokens->get_map()) {
-      if (!m_parser->parse(section_tokens, m_tokens->get_generated())) {
-        // Parse error - continue to collect more errors
-        continue;
+      // Check if there's any cpp2 code to parse
+      if (!m_source->has_cpp2()) {
+        // No cpp2 code - this is valid but there's nothing to parse
+        m_valid = true;
+        return;
       }
+
+      // Lex the source
+      m_tokens = std::make_unique<cpp2::tokens>(*m_errors);
+      m_tokens->lex(m_source->get_lines());
+
+      // Parse the tokens
+      std::set<std::string> includes;
+      m_parser = std::make_unique<cpp2::parser>(*m_errors, includes);
+
+      // Parse each section of cpp2 code
+      for (const auto& [lineno, section_tokens] : m_tokens->get_map()) {
+        if (!m_parser->parse(section_tokens, m_tokens->get_generated())) {
+          // Parse error - continue to collect more errors
+          continue;
+        }
+      }
+
+      // Run semantic analysis
+      m_sema = std::make_unique<cpp2::sema>(*m_errors);
+      m_parser->visit(*m_sema);
+      m_sema->apply_local_rules();
+
+      m_valid = m_errors->empty();
+    } catch (const std::exception& e) {
+      // Cppfront threw an exception (e.g., unexpected EOF)
+      // Add it as an error and keep cached results if available
+      m_errors->emplace_back(cpp2::source_position{1, 1},
+                             std::string("Parser exception: ") + e.what());
+      m_valid = false;
+      // Don't clear cached results - they're still useful
+      return;
     }
-
-    // Run semantic analysis
-    m_sema = std::make_unique<cpp2::sema>(*m_errors);
-    m_parser->visit(*m_sema);
-    m_sema->apply_local_rules();
-
-    m_valid = m_errors->empty();
 
     // Cache successful parse results for use during editing
     // Note: We can't copy sema because it has a reference member,
@@ -595,6 +607,156 @@ namespace cpp2ls {
     }
 
     return result;
+  }
+
+  auto Cpp2Document::get_signature_help(int line, int col,
+                                        const ProjectIndex* index) const
+      -> std::optional<SignatureHelpInfo> {
+    // Use cached sema if current is null or has errors
+    const cpp2::sema* sema_to_use = m_sema.get();
+    if (m_cached_sema) {
+      bool current_empty = !sema_to_use || sema_to_use->symbols.empty();
+      bool cached_has_more = m_cached_sema->symbols.size()
+                             > (sema_to_use ? sema_to_use->symbols.size() : 0);
+      if (current_empty || (!m_valid && cached_has_more)) {
+        sema_to_use = m_cached_sema.get();
+      }
+    }
+
+    if (!sema_to_use) {
+      return std::nullopt;
+    }
+
+    // Convert to 1-based for cppfront
+    int target_line = line + 1;
+    int target_col = col + 1;
+
+    // Strategy: Look backwards from cursor to find function call
+    // We're looking for a pattern like: function_name( ... cursor is here
+    // We need to:
+    // 1. Find the opening '(' before cursor
+    // 2. Find the function name before '('
+    // 3. Count commas to determine active parameter
+
+    // Scan backwards through tokens to find function call context
+    const cpp2::tokens* tokens_to_use
+        = m_tokens ? m_tokens.get() : m_cached_tokens.get();
+    if (!tokens_to_use) {
+      return std::nullopt;
+    }
+
+    // Find tokens before cursor
+    const cpp2::token* function_name_token = nullptr;
+    int paren_depth = 0;
+    int active_param = 0;
+    bool found_open_paren = false;
+
+    // Scan tokens up to cursor position
+    for (const auto& [lineno, section_tokens] : tokens_to_use->get_map()) {
+      for (const auto& token : section_tokens) {
+        auto pos = token.position();
+
+        // Skip tokens after cursor
+        if (pos.lineno > target_line
+            || (pos.lineno == target_line && pos.colno >= target_col)) {
+          break;
+        }
+
+        auto token_str = token.to_string();
+
+        // Track parentheses depth
+        if (token_str == "(") {
+          paren_depth++;
+          if (paren_depth == 1 && !found_open_paren) {
+            // This is the opening paren of the function call we're in
+            found_open_paren = true;
+            active_param = 0;
+          }
+        } else if (token_str == ")") {
+          paren_depth--;
+          if (paren_depth == 0) {
+            // We exited the function call, reset
+            found_open_paren = false;
+            function_name_token = nullptr;
+            active_param = 0;
+          }
+        } else if (token_str == "," && paren_depth == 1 && found_open_paren) {
+          // Count commas at depth 1 to track active parameter
+          active_param++;
+        } else if (paren_depth == 0
+                   && token.type() == cpp2::lexeme::Identifier) {
+          // Potential function name before '('
+          function_name_token = &token;
+        }
+      }
+    }
+
+    // If we're not inside a function call, no signature help
+    if (!found_open_paren || !function_name_token || paren_depth != 1) {
+      return std::nullopt;
+    }
+
+    std::string func_name = function_name_token->to_string();
+
+    // Look up the function in sema
+    auto decl_info = sema_to_use->get_declaration_of(function_name_token, true);
+    if (!decl_info || !decl_info->declaration
+        || !decl_info->declaration->is_function()) {
+      // Try to find function in sema symbols by name
+      if (sema_to_use) {
+        for (size_t i = 0; i < sema_to_use->symbols.size(); ++i) {
+          const auto& sym = sema_to_use->symbols[i];
+          if (sym.is_declaration()) {
+            const auto& decl_sym = std::get<cpp2::declaration_sym>(sym.sym);
+            if (decl_sym.declaration && decl_sym.declaration->has_name()
+                && decl_sym.declaration->name()->to_string() == func_name
+                && decl_sym.declaration->is_function()) {
+              SignatureHelpInfo help;
+              SignatureInfo sig;
+              sig.label = decl_sym.declaration->signature_to_string();
+              sig.active_parameter = active_param;
+              help.signatures.push_back(std::move(sig));
+              help.active_signature = 0;
+              return help;
+            }
+          }
+        }
+      }
+
+      // Try index for cross-file functions
+      if (index) {
+        auto symbols = index->lookup(function_name_token->to_string());
+        if (!symbols.empty() && symbols[0]->kind == SymbolKind::Function) {
+          SignatureHelpInfo help;
+          SignatureInfo sig;
+          sig.label = symbols[0]->signature.empty() ? symbols[0]->name
+                                                    : symbols[0]->signature;
+          sig.active_parameter = active_param;
+          // TODO: Parse parameters from signature
+          help.signatures.push_back(std::move(sig));
+          help.active_signature = 0;
+          return help;
+        }
+      }
+      return std::nullopt;
+    }
+
+    // Build signature help from declaration
+    SignatureHelpInfo help;
+    SignatureInfo sig;
+
+    // Get full function signature
+    sig.label = decl_info->declaration->signature_to_string();
+    sig.active_parameter = active_param;
+
+    // For now, we don't parse individual parameters from the signature
+    // The signature string contains all the info, editors will display it
+    // TODO: Parse signature_to_string to extract individual parameters
+
+    help.signatures.push_back(std::move(sig));
+    help.active_signature = 0;
+
+    return help;
   }
 
   auto Cpp2Document::diagnostics() const -> std::vector<DiagnosticInfo> {
