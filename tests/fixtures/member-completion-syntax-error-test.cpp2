@@ -1,0 +1,31 @@
+// Test member completion with syntax errors
+// This tests the text fallback mechanism
+
+Person: type = {
+    name: std::string;
+    age: int;
+    
+    get_name: (this) -> std::string = {
+        return name;
+    }
+    
+    get_age: (this) -> int = {
+        return age;
+    }
+}
+
+main: () -> int = {
+    p: Person = ("Alice", 25);
+    
+    // Test 1: Complete syntax (baseline)
+    x := p.get_name();
+    
+    // Test 2: Incomplete - user is typing "p."
+    // Cursor at end of line, after the dot
+    p.
+    
+    // Test 3: Incomplete - user is typing "p.."
+    p..
+    
+    return 0;
+}

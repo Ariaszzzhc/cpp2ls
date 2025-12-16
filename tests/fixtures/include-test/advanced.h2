@@ -1,0 +1,32 @@
+// Advanced utilities that include types.h2
+
+#include "types.h2"
+
+create_vector: (x: double, y: double) -> Vector2D = {
+    v: Vector2D = (x, y);
+    return v;
+}
+
+normalize_vector: (v: Vector2D) -> Vector2D = {
+    len := v.length();
+    if len == 0.0 {
+        return v;
+    }
+    result: Vector2D = (v.x / len, v.y / len);
+    return result;
+}
+
+get_status_name: (status: int) -> std::string = {
+    if status == Status::OK {
+        return "OK";
+    }
+    else if status == Status::ERROR {
+        return "ERROR";
+    }
+    else if status == Status::PENDING {
+        return "PENDING";
+    }
+    else {
+        return "UNKNOWN";
+    }
+}

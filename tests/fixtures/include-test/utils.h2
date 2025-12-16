@@ -1,0 +1,19 @@
+// Utility functions header file
+
+add: (x: int, y: int) -> int = {
+    return x + y;
+}
+
+multiply: (x: int, y: int) -> int = {
+    return x * y;
+}
+
+Point: type = {
+    x: int;
+    y: int;
+}
+
+make_point: (x: int, y: int) -> Point = {
+    p: Point = (x, y);
+    return p;
+}

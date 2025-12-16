@@ -143,6 +143,11 @@ namespace cpp2ls {
     /// Find the token at the given position (1-based line and column)
     auto find_token_at(int line, int col) const -> const cpp2::token*;
 
+    /// Find the nearest identifier token with given name before the position
+    /// (1-based line and column)
+    auto find_identifier_token_before(const std::string& name, int line,
+                                      int col) const -> const cpp2::token*;
+
     /// Build hover content for a declaration
     auto build_hover_content(const cpp2::declaration_sym& sym) const
         -> std::string;

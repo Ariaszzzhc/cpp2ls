@@ -344,6 +344,261 @@ namespace cpp2ls {
 
     // Convert to 1-based for cppfront
     int target_line = line + 1;
+    int target_col = col + 1;
+
+    // Check if we're completing a member access (obj. or obj:)
+    // Look backwards in the current line for '.' or ':'
+    std::string line_text;
+    if (!m_content.empty()) {
+      // Extract current line (0-based)
+      size_t line_start = 0;
+      for (int i = 0; i < line; ++i) {
+        line_start = m_content.find('\n', line_start);
+        if (line_start == std::string::npos) break;
+        ++line_start;
+      }
+      if (line_start != std::string::npos) {
+        size_t line_end = m_content.find('\n', line_start);
+        if (line_end == std::string::npos) {
+          line_end = m_content.length();
+        }
+        line_text = m_content.substr(line_start, line_end - line_start);
+      }
+    }
+
+    // Check for member access pattern
+    std::string object_name;
+    bool is_member_completion = false;
+    bool is_member_only = false;  // true for '..' operator (no UFCS)
+    if (col > 0 && col <= static_cast<int>(line_text.length())) {
+      std::string prefix = line_text.substr(0, col);
+
+      // Look for '.' or ':' preceded by identifier
+      size_t accessor_pos = std::string::npos;
+      // Search backwards from cursor to find the most recent '.' or ':'
+      for (int i = static_cast<int>(prefix.length()) - 1; i >= 0; --i) {
+        if (prefix[i] == '.' || prefix[i] == ':') {
+          accessor_pos = i;
+          break;
+        }
+      }
+
+      if (accessor_pos != std::string::npos && accessor_pos > 0) {
+        // Check if it's '..' (member-only) by looking at the character before
+        if (accessor_pos > 0 && prefix[accessor_pos] == '.' && accessor_pos >= 1
+            && prefix[accessor_pos - 1] == '.') {
+          is_member_only = true;
+        }
+        // Extract identifier before accessor (skip if '..')
+        int id_end = is_member_only ? accessor_pos - 2 : accessor_pos - 1;
+        while (id_end >= 0
+               && std::isspace(static_cast<unsigned char>(prefix[id_end]))) {
+          --id_end;
+        }
+
+        if (id_end >= 0) {
+          int id_start = id_end;
+          while (
+              id_start > 0
+              && (std::isalnum(static_cast<unsigned char>(prefix[id_start - 1]))
+                  || prefix[id_start - 1] == '_')) {
+            --id_start;
+          }
+
+          if (id_start <= id_end) {
+            object_name = prefix.substr(id_start, id_end - id_start + 1);
+            is_member_completion = true;
+          }
+        }
+      }
+    }
+
+    // If member completion, find the object's token and get its members
+    if (is_member_completion && !object_name.empty()) {
+      {  // Separate scope to avoid variable conflicts
+        // Use cached sema for member lookup
+        const cpp2::sema* sema_to_use = m_sema.get();
+        const cpp2::tokens* tokens_to_use = m_tokens.get();
+
+        if (m_cached_sema) {
+          bool current_empty = !sema_to_use || sema_to_use->symbols.empty();
+          bool cached_has_more
+              = m_cached_sema->symbols.size()
+                > (sema_to_use ? sema_to_use->symbols.size() : 0);
+          if (current_empty || (!m_valid && cached_has_more)) {
+            sema_to_use = m_cached_sema.get();
+            tokens_to_use = m_cached_tokens.get();  // Use matching tokens!
+          }
+        }
+
+        if (sema_to_use && tokens_to_use) {
+          // Find the token for the object identifier in the matching tokens
+          const cpp2::token* obj_token = nullptr;
+
+          // Search backwards from the cursor position
+          for (const auto& [lineno, section_tokens] :
+               tokens_to_use->get_map()) {
+            if (lineno > target_line) {
+              continue;
+            }
+
+            for (const auto& token : section_tokens) {
+              auto pos = token.position();
+
+              // Skip tokens at or after cursor position
+              if (lineno == target_line && pos.colno >= target_col) {
+                continue;
+              }
+
+              // Check if this is an identifier token with matching name
+              if (token.type() == cpp2::lexeme::Identifier
+                  && token.to_string() == object_name) {
+                // Update best match if this is closer to cursor
+                if (!obj_token || pos.lineno > obj_token->position().lineno
+                    || (pos.lineno == obj_token->position().lineno
+                        && pos.colno > obj_token->position().colno)) {
+                  obj_token = &token;
+                }
+              }
+            }
+          }
+
+          std::cerr << std::format("  Looking for token '{}'\n", object_name);
+          if (obj_token) {
+            // Get declaration for this token
+            auto* decl_sym = sema_to_use->get_declaration_of(obj_token);
+            if (decl_sym && decl_sym->declaration) {
+              if (decl_sym->declaration->is_object()) {
+                auto* obj_decl = decl_sym->declaration;
+                // Get type of the object - use safe object_type() method
+                std::string type_name = obj_decl->object_type();
+
+                if (!type_name.empty()
+                    && type_name.find("(*ERROR*)") == std::string::npos) {
+                  // Find the type declaration
+                  for (const auto& sym : sema_to_use->symbols) {
+                    if (!sym.is_declaration() || !sym.start) continue;
+
+                    const auto& type_sym = sym.as_declaration();
+                    if (!type_sym.declaration || !type_sym.identifier) continue;
+
+                    const auto* type_decl = type_sym.declaration;
+                    if (type_decl->is_type()
+                        && type_sym.identifier->to_string() == type_name) {
+                      // Found the type, now get its members
+                      for (const auto& member_sym : sema_to_use->symbols) {
+                        if (!member_sym.is_declaration() || !member_sym.start)
+                          continue;
+
+                        const auto& mem_decl_sym = member_sym.as_declaration();
+                        if (!mem_decl_sym.declaration
+                            || !mem_decl_sym.identifier)
+                          continue;
+
+                        const auto* mem_decl = mem_decl_sym.declaration;
+                        // Check if this declaration is a member of our type
+                        if (mem_decl->parent_declaration == type_decl) {
+                          auto member_name
+                              = mem_decl_sym.identifier->to_string();
+                          if (!member_name.empty()
+                              && !seen_names.contains(member_name)) {
+                            seen_names.insert(member_name);
+
+                            CompletionInfo info;
+                            info.label = member_name;
+
+                            if (mem_decl->is_function()) {
+                              info.kind = CompletionKind::Function;
+                              info.detail = mem_decl->signature_to_string();
+                              info.insert_text = member_name + "(";
+                            } else if (mem_decl->is_object()) {
+                              info.kind = CompletionKind::Variable;
+                              info.detail = mem_decl->object_type();
+                            }
+
+                            result.push_back(std::move(info));
+                          }
+                        }
+                      }
+
+                      // Add UFCS support: find global functions whose first
+                      // parameter type matches (but only for single '.' not
+                      // '..')
+                      if (!is_member_only) {
+                        // type_name already defined above
+                        for (const auto& func_sym : sema_to_use->symbols) {
+                          if (!func_sym.is_declaration() || !func_sym.start)
+                            continue;
+
+                          const auto& func_decl_sym = func_sym.as_declaration();
+                          if (!func_decl_sym.declaration
+                              || !func_decl_sym.identifier)
+                            continue;
+
+                          const auto* func_decl = func_decl_sym.declaration;
+                          // Only consider global functions (not members)
+                          if (func_decl->is_function()
+                              && !func_decl->parent_declaration) {
+                            // Safely access function parameters
+                            auto& func_type_variant = func_decl->type;
+                            if (func_type_variant.index()
+                                == cpp2::declaration_node::a_function) {
+                              auto* func_type
+                                  = std::get<
+                                        cpp2::declaration_node::a_function>(
+                                        func_type_variant)
+                                        .get();
+                              if (func_type && func_type->parameters
+                                  && func_type->parameters->ssize() > 0) {
+                                auto* first_param = (*func_type->parameters)[0];
+                                if (first_param && first_param->declaration
+                                    && first_param->declaration->is_object()) {
+                                  // Use safe object_type() method
+                                  std::string first_param_type
+                                      = first_param->declaration->object_type();
+
+                                  if (!first_param_type.empty()
+                                      && first_param_type.find("(*ERROR*)")
+                                             == std::string::npos
+                                      && first_param_type == type_name) {
+                                    auto func_name
+                                        = func_decl_sym.identifier->to_string();
+                                    if (!func_name.empty()
+                                        && !seen_names.contains(func_name)) {
+                                      seen_names.insert(func_name);
+
+                                      CompletionInfo info;
+                                      info.label = func_name;
+                                      info.kind = CompletionKind::Function;
+                                      info.detail
+                                          = func_decl->signature_to_string();
+                                      info.insert_text = func_name + "(";
+
+                                      result.push_back(std::move(info));
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+
+                      break;  // Found the type, done
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // Return only member completions
+      return result;
+    }
+
+    // Regular completion (non-member)
 
     // Use cached sema if:
     // 1. Current sema is null or empty, OR
@@ -455,8 +710,8 @@ namespace cpp2ls {
 
         bool is_visible = false;
 
-        // Global functions, types, namespaces are always visible (cpp2 supports
-        // forward references)
+        // Global functions, types, namespaces are always visible (cpp2
+        // supports forward references)
         if (decl->is_function() || decl->is_type() || decl->is_namespace()) {
           if (decl->is_global()) {
             is_visible = true;
@@ -800,6 +1055,50 @@ namespace cpp2ls {
     }
 
     return nullptr;
+  }
+
+  auto Cpp2Document::find_identifier_token_before(const std::string& name,
+                                                  int line, int col) const
+      -> const cpp2::token* {
+    // Use cached tokens if current is null
+    const cpp2::tokens* tokens_to_use
+        = m_tokens ? m_tokens.get() : m_cached_tokens.get();
+
+    if (!tokens_to_use) {
+      return nullptr;
+    }
+
+    const cpp2::token* best_match = nullptr;
+
+    // Search backwards from the cursor position
+    for (const auto& [lineno, section_tokens] : tokens_to_use->get_map()) {
+      // Skip lines after the cursor
+      if (lineno > line) {
+        continue;
+      }
+
+      for (const auto& token : section_tokens) {
+        auto pos = token.position();
+
+        // Skip tokens at or after cursor position
+        if (lineno == line && pos.colno >= col) {
+          continue;
+        }
+
+        // Check if this is an identifier token with matching name
+        if (token.type() == cpp2::lexeme::Identifier
+            && token.to_string() == name) {
+          // Update best match if this is closer to cursor
+          if (!best_match || pos.lineno > best_match->position().lineno
+              || (pos.lineno == best_match->position().lineno
+                  && pos.colno > best_match->position().colno)) {
+            best_match = &token;
+          }
+        }
+      }
+    }
+
+    return best_match;
   }
 
   auto Cpp2Document::build_hover_content(const cpp2::declaration_sym& sym) const

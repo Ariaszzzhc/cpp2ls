@@ -1,0 +1,16 @@
+// Types header file
+
+Vector2D: type = {
+    x: double;
+    y: double;
+    
+    length: (this) -> double = {
+        return std::sqrt(x * x + y * y);
+    }
+}
+
+Status: type = {
+    OK: int == 0;
+    ERROR: int == 1;
+    PENDING: int == 2;
+}

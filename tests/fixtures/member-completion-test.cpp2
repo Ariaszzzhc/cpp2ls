@@ -1,0 +1,74 @@
+// Test member function completion
+
+Person: type = {
+    name: std::string;
+    age: int;
+    
+    // Member functions
+    get_name: (this) -> std::string = {
+        return name;
+    }
+    
+    set_name: (inout this, n: std::string) = {
+        name = n;
+    }
+    
+    get_age: (this) -> int = {
+        return age;
+    }
+    
+    is_adult: (this) -> bool = {
+        return age >= 18;
+    }
+    
+    celebrate_birthday: (inout this) = {
+        age++;
+    }
+}
+
+// Non-member function for UFCS testing
+greet: (p: Person) -> std::string = {
+    return "Hello, " + p.get_name();
+}
+
+print_info: (p: Person) = {
+    std::cout << p.get_name() << " is " << p.get_age() << " years old" << std::endl;
+}
+
+main: () -> int = {
+    p: Person = ("Alice", 25);
+    
+    // Test . (UFCS) - should show both member and non-member functions
+    // p.↓
+    // Should suggest: get_name, set_name, get_age, is_adult, celebrate_birthday
+    // Also: greet, print_info (UFCS - non-member functions taking Person)
+    
+    name := p.get_name();
+    std::cout << "Name: " << name << std::endl;
+    
+    // Test .. (member only) - should show only member functions
+    // p..↓
+    // Should suggest: get_name, set_name, get_age, is_adult, celebrate_birthday
+    // Should NOT suggest: greet, print_info
+    
+    age := p..get_age();
+    std::cout << "Age: " << age << std::endl;
+    
+    // Test member access on member variables
+    // p.age↓
+    // Should NOT suggest anything (int has no members in cpp2)
+    
+    if p.is_adult() {
+        std::cout << "Is an adult" << std::endl;
+    }
+    
+    // UFCS call - calling non-member function as member
+    greeting := p.greet();
+    std::cout << greeting << std::endl;
+    
+    // Member-only call
+    p..celebrate_birthday();
+    std::cout << "After birthday: " << p..get_age() << std::endl;
+    
+    return 0;
+}

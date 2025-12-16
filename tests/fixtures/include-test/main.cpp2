@@ -1,0 +1,39 @@
+// Main file that tests cross-file include dependencies
+// This file includes utils.h2, which in turn can include other headers
+// Testing: go-to-definition, hover, completion across files
+
+#include "utils.h2"
+#include "advanced.h2"
+
+main: () -> int = {
+    // Test basic functions from utils.h2
+    result := add(5, 3);
+    std::cout << "5 + 3 = " << result << std::endl;
+    
+    product := multiply(4, 6);
+    std::cout << "4 * 6 = " << product << std::endl;
+    
+    // Test Point type from utils.h2
+    p := make_point(10, 20);
+    std::cout << "Point: (" << p.x << ", " << p.y << ")" << std::endl;
+    
+    // Test Vector2D from types.h2 (transitively included via advanced.h2)
+    vec := create_vector(3.0, 4.0);
+    std::cout << "Vector length: " << vec.length() << std::endl;
+    
+    // Test normalize function from advanced.h2
+    normalized := normalize_vector(vec);
+    std::cout << "Normalized: (" << normalized.x << ", " << normalized.y << ")" << std::endl;
+    
+    // Test Status constants from types.h2
+    status_msg := get_status_name(Status::OK);
+    std::cout << "Status: " << status_msg << std::endl;
+    
+    return 0;
+}
+
+// Cross-file symbol resolution should work for:
+// 1. add, multiply, make_point (from utils.h2)
+// 2. Point (type from utils.h2)
+// 3. create_vector, normalize_vector, get_status_name (from advanced.h2)
+// 4. Vector2D, Status (from types.h2, transitively)
